@@ -690,7 +690,7 @@ receiver_thread_t::subscribe_mux_not_in_use(
 	bool found = !!fe_;
 	bool is_same_frontend = found && ( fe_key_to_release && *fe_key_to_release == fe_->k);
 	bool deactivate = released_fe_usecount == 0;
-	if (fe_key_to_release) {
+	if (fe_key_to_release && !is_same_frontend) {
 		assert(old_active_adapter);
 		assert((int)subscription_id >= 0);
 		assert(!is_same_frontend);
@@ -1344,14 +1344,20 @@ void receiver_thread_t::cb_t::start_recording(
 	}
 	chdb_txn.abort();
 
-	auto devdb_wtxn =  receiver.chdb.wtxn();
+	auto devdb_wtxn =  receiver.devdb.wtxn();
 
 	dtdebug("RECORD - calling subscribe_");
 	// now perform the requested subscription
 	auto mpm_ptr = this->receiver_thread_t::subscribe_service(futures, devdb_wtxn, mux, rec_in.service,
 																														subscription_id_t{-1});
-	subscription_id_t subscription_id = mpm_ptr.get() ? mpm_ptr->subscription_id : subscription_id_t::NONE;
+	subscription_id_t subscription_id = mpm_ptr.get() ? mpm_ptr->subscription_id : subscription_id_t::RESERVATION_FAILED;
 	devdb_wtxn.commit();
+	if((int)subscription_id < 0 && receiver.global_subscriber) {
+		ss::string<256> msg;
+		msg  << "Could not start recording: " << rec_in.epg.event_name << "\n" << rec_in.service.name  << "\n";
+		msg << get_error();
+		receiver.global_subscriber->notify_error(msg);
+	}
 	/*wait_for_futures is needed because active_adapters/channels may be removed from reserved_services and subscribed_aas
 		This could cause these structures to be destroyed while still in use by by stream/active_adapter threads
 

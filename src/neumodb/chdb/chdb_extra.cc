@@ -540,7 +540,10 @@ update_mux_ret_t chdb::update_mux(db_txn& wtxn, mux_t& mux, system_time_t now_, 
 			return update_mux_ret_t::NO_MATCHING_KEY;
 	}
 
-	assert(!is_template(mux));
+	if(is_template(mux)) {
+		dterror("Unexpected: saving template mux=" << mux);
+		return update_mux_ret_t::EQUAL;
+	}
 	assert(ret != update_mux_ret_t::UNKNOWN);
 	// the database has a mux, but we may need to update it
 
@@ -706,6 +709,7 @@ std::ostream& chdb::operator<<(std::ostream& os, key_src_t key_src) {
 	case key_src_t::PAT_TUNED: os << "pat"; break;
 	case key_src_t::NIT_ACTUAL:  os << "nita"; break;
 	case key_src_t::NIT_OTHER:  os << "nito"; break;
+	case key_src_t::SDT_OTHER:  os << "sdto"; break;
 	case key_src_t::USER:       os << "user"; break;
 	case key_src_t::AUTO:       os << "auto"; break;
 	}

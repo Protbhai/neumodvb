@@ -473,7 +473,7 @@ class TuneMuxPanel(TuneMuxPanel_):
         self.parent.UpdateSignalInfo(signal_info, self.tuned_)
         consolidated_mux = signal_info.consolidated_mux
         sat_pos_confirmed = signal_info.sat_pos_confirmed #and not signal_info.on_wrong_sat
-        nit_valid = consolidated_mux.c.tune_src == pychdb.key_src_t.NIT_TUNED
+        nit_valid = consolidated_mux.c.tune_src == pychdb.tune_src_t.NIT_TUNED
         pol = neumodbutils.enum_to_str(consolidated_mux.pol)
         if self.signal_info.nit_received:
             self.si_freq_text.SetLabel(f'{consolidated_mux.frequency/1e3:,.3f} MHz {pol}'.replace(',', ' ') \
@@ -1025,12 +1025,12 @@ class PositionerDialog(PositionerDialog_):
     def enable_disable_diseqc_panels(self):
         t = pydevdb.rotor_control_t
         if self.lnb_connection is None or \
-           self.lnb_connection.rotor_control in (t.MASTER_USALS, t.SLAVE, t.MASTER_MANUAL):
+           self.lnb_connection.rotor_control in (t.MASTER_USALS, t.NONE, t.MASTER_MANUAL):
             self.diseqc12_panel.Disable()
         else:
             self.diseqc12_panel.Enable()
         if self.lnb_connection is None or \
-           self.lnb_connection.rotor_control in (t.MASTER_DISEQC12, t.SLAVE, t.MASTER_MANUAL):
+           self.lnb_connection.rotor_control in (t.MASTER_DISEQC12, t.NONE, t.MASTER_MANUAL):
             self.usals_panel.Disable()
         else:
             self.usals_panel.Enable()

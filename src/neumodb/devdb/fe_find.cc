@@ -79,7 +79,7 @@ std::tuple<devdb::fe_t, int> fe::subscribe_fe_in_use(db_txn& wtxn, const fe_key_
 
 
 std::optional<devdb::fe_t> fe::find_best_fe_for_dvtdbc(
-	db_txn& rtxn, const devdb::fe_key_t* fe_to_release,
+	db_txn& rtxn, const devdb::fe_key_t* fe_key_to_release,
 	bool need_blindscan, bool need_spectrum, bool need_multistream,
 	chdb::delsys_type_t delsys_type, bool ignore_subscriptions) {
 	bool need_dvbt = delsys_type == chdb::delsys_type_t::DVB_T;
@@ -108,10 +108,11 @@ std::optional<devdb::fe_t> fe::find_best_fe_for_dvtdbc(
 			continue;
 		if (need_dvbt && (!fe.enable_dvbt || !fe::suports_delsys_type(fe, chdb::delsys_type_t::DVB_T)))
 			continue;
+		bool is_subscribed = ignore_subscriptions ? false: fe::is_subscribed(fe);
+		bool is_our_subscription = (ignore_subscriptions || fe.sub.use_count>1) ? false
+			: (fe_key_to_release && fe.k == *fe_key_to_release);
+		if(!is_subscribed  || is_our_subscription) {
 
-		if((!fe::is_subscribed(fe) && ! adapter_in_use(fe.adapter_no)) ||
-			 (fe_to_release && fe.k == *fe_to_release) //consider the future case where the fe will be unsubscribed
-			) {
 			//find the best fe with all required functionality, without taking into account other subscriptions
 			if(!fe.present || ! fe.can_be_used)
 				continue; 			/* we can use this frontend only if it can be connected to the proper input*/
@@ -308,7 +309,7 @@ std::optional<devdb::fe_t> fe::find_best_fe_for_lnb(
 		assert(fe.sub.rf_path.lnb.dish_id == dish_id);
 		return need_exclusivity || //exclusivity cannot be offered
 			(fe.sub.usals_pos == sat_pos_none) ||  //dish is reserved exclusively by fe
-			std::abs(usals_pos - fe.sub.usals_pos) >= sat_pos_tolerance; //dish would need to be moved more than sat_pos_tolerance
+			std::abs(usals_pos - fe.sub.usals_pos) > sat_pos_tolerance; //dish would need to be moved more than sat_pos_tolerance
 	};
 
 	auto c = fe_t::find_by_card_mac_address(rtxn, rf_path.card_mac_address, find_type_t::find_eq,
@@ -508,7 +509,7 @@ fe::find_fe_and_lnb_for_tuning_to_mux(db_txn& rtxn,
 
 			bool conn_can_control_rotor = devdb::lnb::can_move_dish(lnb_connection);
 
-			if (lnb_is_on_rotor && (usals_move_amount >= sat_pos_tolerance) &&
+			if (lnb_is_on_rotor && (usals_move_amount > sat_pos_tolerance) &&
 					(!may_move_dish || ! conn_can_control_rotor)
 				)
 				continue; //skip because dish movement is not allowed or  not possible
@@ -789,7 +790,8 @@ devdb::fe::subscribe_dvbc_or_dvbt_mux(db_txn& wtxn, const mux_t& mux, const devd
 
 	if(!best_fe)
 		return {best_fe, released_fe_usecount}; //no frontend could be found
-
+	if(fe_key_to_release && best_fe->k == *fe_key_to_release)
+		released_fe_usecount++;
 	auto ret = devdb::fe::reserve_fe_dvbc_or_dvbt_mux(wtxn, *best_fe, is_dvbc, mux.frequency, mux.stream_id);
 	assert(ret == 0); //reservation cannot fail as we have a write lock on the db
 	return {best_fe, released_fe_usecount};

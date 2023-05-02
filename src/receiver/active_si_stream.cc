@@ -166,8 +166,8 @@ void active_si_stream_t::add_mux(db_txn& wtxn, chdb::any_mux_t& mux, bool is_act
 					 do not allow overwriting nit_network_id and nit_ts_id
 					 do not allow overwritung scan_status as we cannot be sure of tuning data
 		 */
-		preserve = from_sdt ? m::flags((m::MUX_COMMON  & ~ m::SCAN_STATUS)| m::TUNE_DATA)
-			: m::flags(m::MUX_COMMON & ~ m::NIT_SI_DATA & ~m::SCAN_STATUS);
+		preserve = from_sdt ? m::flags((m::MUX_COMMON /* & ~ m::SCAN_STATUS*/)| m::TUNE_DATA)
+			: m::flags(m::MUX_COMMON & ~ m::NIT_SI_DATA /* & ~m::SCAN_STATUS*/);
 	} else { //!is_active_mux
 		/*NIT: allow overwriting key, but we will only do that if the existing key_src!= SDT_TUNED
 			     allow overwriting tuning data, but we will only do that if the existing tune_src is NIT_ACTUAL
@@ -180,7 +180,7 @@ void active_si_stream_t::add_mux(db_txn& wtxn, chdb::any_mux_t& mux, bool is_act
 		assert(!from_sdt);
 		bool propagate_scan = reader->tune_options().propagate_scan;
 		preserve = propagate_scan
-			? m::flags(m::MUX_COMMON & ~ m::SCAN_STATUS & ~ m::NIT_SI_DATA)
+			? m::flags(m::MUX_COMMON /*& ~ m::SCAN_STATUS*/ & ~ m::NIT_SI_DATA)
 			: m::flags(m::MUX_COMMON & ~ m::NIT_SI_DATA);
 	}
 	if(!this->update_mux(wtxn, mux, now, is_active_mux /*is_reader_mux*/, from_sdt, preserve))
@@ -304,8 +304,8 @@ mux_data_t* active_si_stream_t::add_fake_nit(db_txn& wtxn, uint16_t network_id, 
 		preserve = m::flags{ preserve & ~ m::MUX_COMMON};
 	}
 
-	this->update_mux(wtxn, mux, now, true /*is_reader_mux*/, from_sdt,  m::flags{ m::MUX_COMMON & ~m::SCAN_STATUS } /*preserve*/);
-	assert(mux_key->ts_id == ts_id);
+	this->update_mux(wtxn, mux, now, true /*is_reader_mux*/, from_sdt,  m::flags{ m::MUX_COMMON /*& ~m::SCAN_STATUS*/ } /*preserve*/);
+	//assert(mux_key->ts_id == ts_id);
 	if (!from_sdt && !is_embedded_si) {
 		reader->on_stream_mux_change(mux);
 	}
@@ -425,7 +425,7 @@ mux_data_t* active_si_stream_t::add_reader_mux_from_sdt(db_txn& wtxn, uint16_t n
 		mux_key->network_id = network_id;
 		mux_key->ts_id = ts_id;
 		dtdebug("key change detected: current=" <<  this->stream_mux_key() << " sdt=" << *mux_key);
-		auto preserve = m::flags(m::ALL & ~m::MUX_KEY &~ m::SCAN_STATUS);
+		auto preserve = m::flags(m::ALL & ~m::MUX_KEY/* &~ m::SCAN_STATUS*/);
 		if(!this->update_mux(wtxn, mux, now, true /*is_reader_mux*/, true /*from_sdt*/, preserve)) {
 			dtdebugx("Could not update mux_key");
 			return nullptr; //something went wrong, e.g., on wrong sat
@@ -616,7 +616,7 @@ void active_si_stream_t::fix_tune_mux_template() {
 	}
 	if(is_active ||is_template) { /*we  need to set the active status*/
 		auto wtxn = receiver.chdb.wtxn();
-		chdb::update_mux(wtxn, stream_mux, now,  m::flags{ (m::MUX_COMMON|m::MUX_KEY) & ~m::SCAN_STATUS},
+		chdb::update_mux(wtxn, stream_mux, now,  m::flags{ (m::MUX_COMMON|m::MUX_KEY)/* & ~m::SCAN_STATUS*/},
 										 true  /*ignore_key*/, false /*ignore_t2mi_pid*/, false /*must_exist*/);
 		wtxn.commit();
 	}
@@ -887,7 +887,7 @@ void active_si_stream_t::scan_report() {
 			If no such mux exists one will be created with network_id=ts_id=0
 		*/
 		add_fake_nit(txn, 0, 0, tuned_key.sat_pos, false /*from_sdt*/);
-		assert(tune_confirmation.sat_by == confirmed_by_t::NONE);
+		assert(tune_confirmation.sat_by == confirmed_by_t::NONE || tune_confirmation.sat_by == confirmed_by_t::AUTO);
 		tune_confirmation.sat_by = confirmed_by_t::FAKE;
 		txn.commit();
 		tune_confirmation.si_done = true;
@@ -1302,7 +1302,7 @@ dtdemux::reset_type_t active_si_stream_t::nit_section_cb_(nit_network_t& network
 	auto sat_pos = nit_data.nit_actual_sat_positions.size()>=1 ? nit_data.nit_actual_sat_positions[0] : sat_pos_none;
 	bool is_wrong_dvb_type = dvb_type(sat_pos) != dvb_type(stream_mux);
 	bool on_wrong_sat = !is_wrong_dvb_type //ignore dvbt/dvbc in dvbs muxes for example
-		&& sat_pos != sat_pos_none && std::abs(sat_pos - stream_mux_key->sat_pos) >= sat_pos_tolerance;
+		&& sat_pos != sat_pos_none && std::abs(sat_pos - stream_mux_key->sat_pos) > sat_pos_tolerance;
 
 	ret = on_nit_section_completion(wtxn, network_data, ret, network.is_actual, on_wrong_sat, done);
 	if(ret== dtdemux::reset_type_t::RESET ||
@@ -1368,7 +1368,7 @@ bool active_si_stream_t::fix_mux(chdb::any_mux_t& mux)
 				tmp = *std::get_if<chdb::dvbs_mux_t>(&tuned_mux);
 				tmp.k.ts_id = dvbs_mux->k.ts_id;
 				tmp.k.network_id = dvbs_mux->k.network_id;
-				if(std::abs(dvbs_mux->k.sat_pos - tmp.k.sat_pos) < sat_pos_tolerance)
+				if(std::abs(dvbs_mux->k.sat_pos - tmp.k.sat_pos) <= sat_pos_tolerance)
 					tmp.k.sat_pos = dvbs_mux->k.sat_pos;
 				can_be_tuned = true;
 				*dvbs_mux = tmp;
@@ -1569,7 +1569,7 @@ bool active_si_stream_t::update_mux(
 
 	bool is_wrong_dvb_type = dvb_type(mux) != dvb_type(reader_mux);
 	bool on_wrong_sat = !is_wrong_dvb_type //ignore dvbt/dvbc in dvbs muxes for example
-		&& std::abs(mux_key_ptr(reader_mux)->sat_pos - mux_key_ptr(mux)->sat_pos) >= sat_pos_tolerance;
+		&& std::abs(mux_key_ptr(reader_mux)->sat_pos - mux_key_ptr(mux)->sat_pos) > sat_pos_tolerance;
 	if(on_wrong_sat)
 		return false;
 
@@ -1984,7 +1984,8 @@ dtdemux::reset_type_t active_si_stream_t::sdt_section_cb_(db_txn& wtxn, const sd
 		if (is_actual) {
 			mux = reader_mux;
 
-			assert (mux_key_ptr(reader_mux)->ts_id == mux_key.ts_id);
+			if (mux_key_ptr(reader_mux)->ts_id == mux_key.ts_id)
+				dterrorx("Unexpected: mux_key_ptr(reader_mux)->ts_id != mux_key.ts_id: %d %d\n", mux_key_ptr(reader_mux)->ts_id, mux_key.ts_id);
 		} else {
 			// we need the full mux, so we need to load it from the db
 			// we only update if we found exactly 1 mux; otherwise we better wait for nit_actual/nit_other to tell us the
