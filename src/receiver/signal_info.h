@@ -45,8 +45,6 @@ struct tune_confirmation_t {
 	confirmed_by_t sat_by{confirmed_by_t::NONE};
 	confirmed_by_t ts_id_by{confirmed_by_t::NONE};
 	confirmed_by_t network_id_by{confirmed_by_t::NONE};
-	std::optional<chdb::mux_key_t> sdt_actual_mux_key;
-	std::optional<chdb::mux_key_t> nit_actual_mux_key;
 	bool nit_actual_seen{false};
 	bool nit_actual_received{false};
 	bool sdt_actual_seen{false};
@@ -87,8 +85,21 @@ struct fe_lock_status_t {
 	int16_t matype{-1};
 	//true if we detected this is not a dvbs transport stream
 	inline bool is_locked() {
-		return fe_status & FE_HAS_LOCK;
+		return fe_status & FE_HAS_VITERBI;
 	}
+
+	inline chdb::lock_result_t tune_lock_result() {
+		if(fe_status & FE_HAS_SYNC)
+			return chdb::lock_result_t::SYNC;
+		else if (fe_status & FE_HAS_VITERBI)
+			return chdb::lock_result_t::FEC;
+		else if (fe_status & FE_HAS_LOCK)
+			return chdb::lock_result_t::CAR;
+		else if (fe_status & FE_HAS_TIMING_LOCK)
+			return chdb::lock_result_t::TMG;
+		return chdb::lock_result_t::NOLOCK;
+	}
+
 	inline bool has_soft_tune_failure() {
 		return fe_status & FE_OUT_OF_RESOURCES;
 	}
@@ -97,21 +108,28 @@ struct fe_lock_status_t {
 			matype != 256 && //dvbs
 			(matype >> 6) != 3; //not a transport stream
 		}
+	inline bool is_dvb() {
+		if(matype==-2) {
+			//dvbt or dvbc
+			return is_locked();
+		}
+		return is_locked() && matype >=0 && // otherwise we do not know matype yet
+			(matype == 256 || //dvbs
+			 (matype >> 6) == 3); //not a transport stream
+		}
 };
 
 struct signal_info_t {
 	int tune_count{0}; //increases by 1 with every tune
+	bool driver_data_reliable{true};
 	dvb_frontend_t* fe{nullptr};
 	devdb::fe_key_t fe_key;
 	uint32_t uncorrected_driver_freq{0};
 	chdb::any_mux_t driver_mux; /*contains only confirmed information, with information from driver
 													overriding that from si stream. Missing information is filled in with
 													confirmed information*/
-	chdb::any_mux_t consolidated_mux; /*contains the most uuptodate information about the currently
-																tuned mux, including possible corrections received from the si
-																stream
-															*/
-	std::optional<chdb::any_mux_t> bad_received_si_mux;
+	std::optional<chdb::any_mux_t> received_si_mux;
+	bool received_si_mux_is_bad{false};
 	int32_t bitrate{0};
 	int32_t locktime_ms{0};
 	statdb::signal_stat_t stat;

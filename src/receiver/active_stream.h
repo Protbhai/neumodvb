@@ -65,7 +65,7 @@ class active_adapter_t;
 class epoll_tx1;
 
 class stream_reader_t : public std::enable_shared_from_this<stream_reader_t> {
-	constexpr static  std::chrono::duration data_timeout = 50000ms; //in ms
+	constexpr static  std::chrono::duration data_timeout = 10000ms; //in ms
 	steady_time_t last_data_time{};
 
 public:
@@ -104,8 +104,9 @@ public:
 	virtual void close() {
 	}
 
-	virtual void reset()  {
+	virtual void reset() final {
 		num_read = 0;
+		data_tick();
 	}
 
 
@@ -116,7 +117,7 @@ public:
 	const tune_options_t& tune_options() const;
 
 	virtual inline void on_stream_mux_change(const chdb::any_mux_t& mux) =0;
-	virtual inline void update_bad_received_si_mux(const std::optional<chdb::any_mux_t>& mux) =0;
+	virtual inline void update_received_si_mux(const std::optional<chdb::any_mux_t>& mux, bool is_bad) =0;
 
 	virtual inline void set_current_tp(const chdb::any_mux_t& stream_mux) const = 0;
 	void  update_stream_mux_tune_confirmation(const tune_confirmation_t& tune_confirmation);
@@ -124,7 +125,7 @@ public:
 	//stream_mux is the currently active mux, which is the embedded mux for t2mi and the tuned_mux in other cases
 	virtual void update_stream_mux_nit(const chdb::any_mux_t& stream_mux) = 0;
 
-	virtual inline bool on_epoll_event(int fd) = 0;
+	virtual inline bool on_epoll_event(const epoll_event* evt) = 0;
 
 	virtual inline std::tuple<uint8_t*, ssize_t> read(ssize_t size=-1)  = 0;
 	virtual inline void discard(ssize_t bytes)  =0;
@@ -148,7 +149,7 @@ public:
 
 	int16_t get_sat_pos() const;
 	virtual int embedded_stream_pid() const {
-		return 0;
+		return -1;
 	}
 };
 
@@ -173,8 +174,8 @@ struct dvb_stream_reader_t final : public stream_reader_t {
 		return demux_fd >= 0;
 	}
 
-	virtual inline bool on_epoll_event(int fd) {
-		return demux_fd == fd;
+	virtual inline bool on_epoll_event(const epoll_event* evt) {
+		return demux_fd == (evt->data.u64 & 0xffffffff);
 	}
 	virtual int open(uint16_t initial_pid, epoll_t* epoll,
 									 int epoll_flags = EPOLLIN|EPOLLERR|EPOLLHUP|EPOLLET);
@@ -183,7 +184,7 @@ struct dvb_stream_reader_t final : public stream_reader_t {
 	virtual inline void set_current_tp(const chdb::any_mux_t& mux) const;
 	virtual chdb::any_mux_t stream_mux() const;
 	virtual inline void on_stream_mux_change(const chdb::any_mux_t& mux);
-	virtual inline void update_bad_received_si_mux(const std::optional<chdb::any_mux_t>& mux);
+	virtual inline void update_received_si_mux(const std::optional<chdb::any_mux_t>& mux, bool is_bad);
 
 	//stream_mux is the currently active mux, which is the embedded mux for t2mi and the tuned_mux in other cases
 	virtual void update_stream_mux_nit(const chdb::any_mux_t& stream_mux);
@@ -270,7 +271,7 @@ public:
 	virtual void close();
 
 
-	virtual bool on_epoll_event(int fd);
+	virtual bool on_epoll_event(const epoll_event* evt);
 
 	virtual inline int add_pid(int pid) {
 		return 0; //we don't care
@@ -297,6 +298,7 @@ public:
 	virtual inline void discard(ssize_t num_bytes);
 
 	virtual ~embedded_stream_reader_t() {
+		notifier.close();
 		close();
 	}
 
@@ -307,7 +309,7 @@ public:
 	virtual void update_stream_mux_nit(const chdb::any_mux_t& stream_mux);
 
 	virtual void on_stream_mux_change(const chdb::any_mux_t& mux);
-	virtual void update_bad_received_si_mux(const std::optional<chdb::any_mux_t>& mux);
+	virtual void update_received_si_mux(const std::optional<chdb::any_mux_t>& mux, bool is_bad);
 
 };
 

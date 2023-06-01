@@ -18,17 +18,16 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  */
-
+#include "util/dtassert.h"
 #include "neumodb/chdb/chdb_extra.h"
 #include "neumodb/devdb/devdb_extra.h"
 #include "receiver/neumofrontend.h"
 #include "stackstring/ssaccu.h"
-#include "xformat/ioformat.h"
+//#include "xformat/ioformat.h"
 #include "util/template_util.h"
 #include <signal.h>
 #include <iomanip>
 #include <iostream>
-
 #include "../util/neumovariant.h"
 
 using namespace chdb;
@@ -118,7 +117,7 @@ void chdb::clean_chgms_without_services(db_txn& wtxn)
 	auto c = find_first<chgm_t>(wtxn);
 	for(auto record: c.range())  {
 		auto& service_key =  record.service;
-		auto c1 = service_t::find_by_key(wtxn, service_key, find_type_t::find_eq);
+		auto c1 = service_t::find_by_key(wtxn, service_key.mux, service_key.service_id, find_type_t::find_eq);
 		if(!c1.is_valid()) {
 			delete_record(wtxn, record);
 			count++;
@@ -164,11 +163,11 @@ template <typename mux_t> void chdb::clear_all_streams_pending_status(
 			break; //we have reached the end
 		if ((int)mux.frequency >  (int) ref_mux.frequency + tolerance)
 			break; //we have reached the end
-		if(mux.k == ref_mux.k || mux.stream_id == ref_mux.stream_id)
+		if(mux.k == ref_mux.k || mux.k.stream_id == ref_mux.k.stream_id)
 			continue;
 		if(!matches_physical(mux, ref_mux, true /*check_sat_pos*/, true /*ignore_stream_id*/))
 				continue;
-		if(mux.c.scan_status == scan_status_t::PENDING && mux.c.scan_id == ref_mux.c.scan_id && mux.stream_id>=0) {
+		if(mux.c.scan_status == scan_status_t::PENDING && mux.c.scan_id == ref_mux.c.scan_id && mux.k.stream_id>=0) {
 			mux.c.scan_status = scan_status_t::IDLE;
 			mux.c.scan_result = ref_mux.c.scan_result;
 			put_record(chdb_wtxn, mux);

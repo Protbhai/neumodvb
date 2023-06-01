@@ -18,6 +18,7 @@
  *
  */
 #include "active_adapter.h"
+#include "util/dtassert.h"
 #include <memory>
 #include <atomic>
 #include <unistd.h>
@@ -27,7 +28,6 @@
 #include <errno.h>
 #include <sys/epoll.h>
 #include <fcntl.h>
-#include <cassert>
 #include <mutex>
 #pragma once
 class embedded_stream_reader_t;
@@ -65,6 +65,7 @@ class stream_filter_t {
 																					command but which has  not been fully tranitted*/
 	bool read_and_process_data();
 public:
+
 	stream_filter_t(active_adapter_t& active_adapter, const chdb::any_mux_t& mux,
 									epoll_t* epoll, int epoll_flags = EPOLLIN|EPOLLERR|EPOLLHUP|EPOLLET);
 

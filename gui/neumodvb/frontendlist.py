@@ -47,17 +47,15 @@ def rf_inputs_fn(x):
 
 def subscription_fn(x):
     sub = x[0].sub
-    if sub.usals_pos == pychdb.sat.sat_pos_none:
+    if sub.mux_key.sat_pos == pychdb.sat.sat_pos_none:
         return ""
-    sid = "" if (sub.stream_id < 0)  else f'-{sub.stream_id}'
-    if sub.usals_pos not in (pychdb.sat.sat_pos_dvbc, pychdb.sat.sat_pos_dvbt):
-        sat_pos=pychdb.sat_pos_str(sub.usals_pos)
+    sid = f" {sub.mux_key.mux_id}" if (sub.mux_key.stream_id < 0)  else f'-{sub.mux_key.stream_id} {sub.mux_key.mux_id}'
+    if sub.mux_key.sat_pos not in (pychdb.sat.sat_pos_dvbc, pychdb.sat.sat_pos_dvbt):
+        sat_pos=pychdb.sat_pos_str(sub.mux_key.sat_pos)
         t= lastdot(sub.rf_path.lnb.lnb_type)
         e = neumodbutils.enum_to_str
-        if t != 'C':
-            t='Ku'
-            f = f'{e(sub.band)}{e(sub.pol)}' if sub.frequency == 0 else f'{sub.frequency/1000.:9.3f}{e(sub.pol)}{sid}'
-            return f'#{sub.rf_path.rf_input} {sat_pos:>5}{t} {f} {sub.rf_path.lnb.lnb_id}'
+        f = f'{e(sub.band)}{e(sub.pol)}' if sub.frequency == 0 else f'{sub.frequency/1000.:9.3f}{e(sub.pol)}{sid}'
+        return f'#{sub.rf_path.rf_input} {sat_pos:>5}{t} {f} {sub.rf_path.lnb.lnb_id}'
     else:
             f = f'{e(sub.band)}{e(sub.pol)}' if sub.frequency == 0 else f'{sub.frequency/1000.:9.3f}{sid}'
             return f'#{sub.rf_path.rf_input} {f}'
@@ -133,7 +131,7 @@ class FrontendTable(NeumoTable):
         """
         rec = self.CurrentlySelectedRecord()
         d = set([pychdb.delsys_to_type(d) for d in rec.delsys])
-        d.remove(pychdb.delsys_type_t.NONE)
+        d.discard(pychdb.delsys_type_t.NONE)
         choices = [ '', 'S'  ] if pychdb.delsys_type_t.DVB_S in d else [ '' ]
         choices = choices + [ c + '+T'  for c in choices ] if pychdb.delsys_type_t.DVB_T in d else choices
         choices = choices + [ c + '+C'  for c in choices ] if pychdb.delsys_type_t.DVB_C in d else choices

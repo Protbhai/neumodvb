@@ -26,7 +26,7 @@ from dateutil import tz
 from neumodvb.util import setup, get_text_extent, wxpythonversion, wxpythonversion42
 from neumodvb.neumo_dialogs import ShowMessage
 from neumodvb.chepglist import content_types
-from neumodvb.util import dtdebug, dterror
+from neumodvb.util import dtdebug, dterror, lastdot
 from neumodvb.neumodbutils import enum_to_str
 from neumodvb.record_dialog import show_record_dialog
 
@@ -827,7 +827,7 @@ class SatBouquetGroupSelectPanel(GroupSelectPanel):
             (_("Sorted by channel number"), ('ch_order',)),
             (_("Sorted by name"), ('name',)),
             (_("Sorted by modification time"), ('mtime',)),
-            (_("Sorted by sat/mux"), ('mux_desc', 'k.service_id'))
+            (_("Sorted by sat/mux"), ('frequency', 'pol', 'k.service_id'))
         )
         self.sorttypes_chgm = (
             (_("Sort by channel number"), ('chgm_order',)),
@@ -1992,7 +1992,12 @@ class ServiceChannelPanel(RecordPanel):
         if service is None:
             infow.WriteText(f" Missing service! ")
         else:
-            infow.WriteText(f"{service.mux_desc} nid={service.k.mux.network_id} tid={service.k.mux.ts_id} ")
+            pol = lastdot(service.pol).replace('POL','')
+            stream = '' if service.k.mux.stream_id < 0 else f'-{service.k.mux.stream_id}'
+            t2mi = '' if service.k.mux.t2mi_pid < 0 else f' T{service.k.mux.t2mi_pid}'
+
+            infow.WriteText(f"{service.frequency/1000.:9.3f}{pol}{stream}{t2mi} " \
+                            f"nid={service.k.network_id} tid={service.k.ts_id} ")
         infow.EndAlignment()
         if service is not None:
             infow.WriteText(f"sid={service.k.service_id} pmt={service.pmt_pid}\n\n")

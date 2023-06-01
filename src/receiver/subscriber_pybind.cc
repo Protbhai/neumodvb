@@ -391,18 +391,17 @@ void export_signal_info(py::module& m) {
 		.def_property_readonly("driver_mux", [](const signal_info_t& i) { //tuned mux
 			return &i.driver_mux;
 		}
-			, "Information received from driver, with missing info filled in from consolidated_mux"
+			, "Information received from driver"
 		)
-		.def_property_readonly("consolidated_mux", [](const signal_info_t& i) { //si mux data
-			return &i.consolidated_mux;
+		.def_property_readonly("received_si_mux", [](const signal_info_t& i) {
+			return &i.received_si_mux;
 		}
-			, "NIT info after combining all available information, taking into account database, driver and received info"
+			, "NIT info as received from the current stream"
 			)
-		.def_property_readonly("bad_received_si_mux", [](const signal_info_t& i) {
-
-			return &i.bad_received_si_mux;
+		.def_property_readonly("received_si_mux_is_bad", [](const signal_info_t& i) {
+			return &i.received_si_mux_is_bad;
 		}
-			, "NIT info as received from the current stream, but only iof it conflicts with consolidated_mux"
+			, "NIT info as received from the current stream is considered incorrect"
 			)
 		.def_property_readonly("min_snr", [](const signal_info_t& i) {
 			return (int)(chdb::min_snr(i.driver_mux)*1000);
@@ -418,6 +417,7 @@ void export_sdt_data(py::module& m) {
 	using namespace chdb;
 	py::class_<sdt_data_t>(m, "sdt_data_t")
 		.def(py::init())
+		.def_readwrite("mux_key", &sdt_data_t::mux_key)
 		.def_readwrite("network_id", &sdt_data_t::actual_network_id)
 		.def_readwrite("ts_id", &sdt_data_t::actual_ts_id)
 		.def_property_readonly("services", [](sdt_data_t& sdt_data) {

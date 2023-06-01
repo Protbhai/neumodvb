@@ -18,7 +18,7 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  */
-
+#include "util/dtassert.h"
 #include "neumodb/chdb/chdb_extra.h"
 #include "receiver/neumofrontend.h"
 #include "stackstring/ssaccu.h"
@@ -145,8 +145,8 @@ std::ostream& devdb::operator<<(std::ostream& os, const fe_t& fe) {
 
 
 std::ostream& devdb::operator<<(std::ostream& os, const fe_subscription_t& sub) {
-	stdex::printf(os, "%d.%d%c use_count=%d ", sub.frequency/1000, sub.frequency%1000,
-								sub.pol == chdb::fe_polarisation_t::H ? 'H': 'V', sub.use_count);
+	stdex::printf(os, "%d.%d%s-%d %d use_count=%d ", sub.frequency/1000, sub.frequency%1000,
+								pol_str(sub.pol), sub.mux_key.stream_id, sub.mux_key.mux_id, sub.use_count);
 	return os;
 
 }
@@ -1165,14 +1165,22 @@ bool devdb::lnb::update_lnb_from_lnblist(db_txn& devdb_wtxn, devdb::lnb_t&  lnb,
 
 void devdb::lnb::reset_lof_offset(db_txn& devdb_wtxn, devdb::lnb_t&  lnb)
 {
+
+	tuned_frequency_offsets_key_t k{lnb.k, {}};
+	auto c = devdb::tuned_frequency_offsets_t::find_by_key(devdb_wtxn, k, find_type_t::find_geq,
+																												 tuned_frequency_offsets_t::partial_keys_t::lnb_key,
+																												 tuned_frequency_offsets_t::partial_keys_t::lnb_key);
+	for(; c.is_valid(); c.next()) {
+#ifndef NDEBUG
+		auto tst = c.current();
+		assert (tst.k.lnb_key == lnb.k);
+#endif
+		delete_record_at_cursor(c);
+	}
+
 	lnb.lof_offsets.resize(2);
 	lnb.lof_offsets[0] = 0;
 	lnb.lof_offsets[1] = 0;
-	tuned_frequency_offsets_t record;
-	record.k = {lnb.k, fe_band_t::LOW};
-	delete_record(devdb_wtxn, record);
-	record.k.band = fe_band_t::HIGH;
-	delete_record(devdb_wtxn, record);
 }
 
 
@@ -1283,27 +1291,6 @@ void devdb::lnb::update_lnbs(db_txn& devdb_wtxn) {
 			} else {
 				invalidate_lnb_adapter_fields(devdb_wtxn, lnb);
 			}
-		}
-	}
-}
-
-void devdb::lnb::on_mux_key_change(db_txn& devdb_wtxn, const chdb::mux_key_t& old_mux_key,
-																	 chdb::dvbs_mux_t& new_mux, system_time_t now_) {
-	auto now = system_clock_t::to_time_t(now_);
-	using namespace chdb;
-	auto& new_mux_key = *mux_key_ptr(new_mux);
-	{
-		auto c = find_first<lnb_t>(devdb_wtxn);
-		for(auto lnb: c.range()) {
-			auto* n = lnb::get_network(lnb, old_mux_key.sat_pos);
-			if(n) {
-				lnb.mtime = now;
-				if (n->ref_mux == old_mux_key) {
-					n->ref_mux = new_mux_key;
-					put_record(devdb_wtxn, lnb);
-				}
-			}
-			break;
 		}
 	}
 }

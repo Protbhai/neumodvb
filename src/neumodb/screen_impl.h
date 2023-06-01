@@ -32,6 +32,7 @@
 #include "neumodb/neumodb.h"
 #include "neumodb/epgdb/extra.h"
 #include "neumodb/recdb/extra.h"
+#include "util/dtassert.h"
 #endif
 
 
@@ -305,7 +306,7 @@ bool screen_t<record_t>::update_if_matches(db_txn& from_txn, 	function_view<bool
 		bool has_been_deleted = !c.maincursor.is_valid(); //@todo: maybe too much of a hack
 		ss::bytebuffer<32> old_secondary_key;
 		/*check if we have already a record with the same primary key in to_db.
-			If such a record exists, it may move to a differetn location in the secondary
+			If such a record exists, it may move to a different location in the secondary
 			indexes of to_db*/
 #ifdef DEBUG_PRINT
 		auto x = c.current_serialized_secondary_key();
@@ -401,7 +402,7 @@ inline db_tcursor_index<record_t> screen_t<record_t>::last_cursor(db_txn& rtxn)
 
 	auto find_type =  find_type_t::find_leq;
 	auto key_prefix =record_t::make_key(sort_order, record_t::partial_keys_t::none, nullptr, false);
-	auto upper_limit =record_t::make_key(sort_order, record_t::partial_keys_t::all, nullptr, true);
+	auto upper_limit =record_t::make_key(sort_order, record_t::partial_keys_t::none, nullptr, true);
 	auto c = secondary_key_t::template find_by_serialized_key<record_t>(rtxn, upper_limit,
 																																			key_prefix,
 																																			find_type);
@@ -658,6 +659,8 @@ record_t screen_t<record_t>::record_at_row(int row_number)
 	else if(row_number == monitor.auxiliary_reference.row_number)
 		return auxiliary_current_record;
 	assert(0);
+	//only for debugging
+	set_reference(row_number);
 	return primary_current_record;
 }
 

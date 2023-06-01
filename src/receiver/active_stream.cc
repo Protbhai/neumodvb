@@ -181,8 +181,6 @@ void active_stream_t::close() {
 	 In case the pid is already opened, the existing one is returned
 	 Pid will be received as a transport stream on a single file descriptor shared with other pids
 
-	 TODO: should there not be a use count? Suppose two channels are opened which share a pid (can
-	 this happen?) remove_pid may then remove both
 	 @param pid the pid for the filter
 	 Output is sent to /dev/dvb/adapter%d/demux%d
 	 Returns 0 or -1
@@ -307,9 +305,9 @@ void dvb_stream_reader_t::on_stream_mux_change(const chdb::any_mux_t& stream_mux
 	active_adapter.on_tuned_mux_change(stream_mux); //for active_adapter stream_mux == tuned_mux
 }
 
-void dvb_stream_reader_t::update_bad_received_si_mux(const std::optional<chdb::any_mux_t>& mux)
+void dvb_stream_reader_t::update_received_si_mux(const std::optional<chdb::any_mux_t>& mux, bool is_bad)
 {
-	active_adapter.update_bad_received_si_mux(mux);
+	active_adapter.update_received_si_mux(mux, is_bad);
 }
 
 

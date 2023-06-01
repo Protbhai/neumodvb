@@ -97,12 +97,15 @@ class ServiceTable(NeumoTable):
     all_columns = \
         [CD(key='ch_order',  label='#', basic=True, example="10000"),
          CD(key='name',  label='Name', basic=True, example="Investigation discovery12345"),
-         CD(key='mux_desc',  label='mux', example=" 28.2E 10740V "),
+         CD(key='frequency',  label='freq', dfn= lambda x: f'{x[1]/1000.:9.3f}', example=" 10725.114 "),
+         CD(key='pol',  label='pol', dfn=lambda x: lastdot(x[1]).replace('POL',''), example='V'),
          CD(key='k.mux.sat_pos', label='Sat', basic=True, dfn= lambda x: pychdb.sat_pos_str(x[1])),
-         CD(key='k.mux.network_id',  label='nid'),
-         CD(key='k.mux.ts_id',  label='tsid'),
+         CD(key='k.mux.mux_id',  label='mux\nid'),
+         CD(key='k.network_id',  label='nid'),
+         CD(key='k.ts_id',  label='tsid'),
          CD(key='k.service_id',  label='sid'),
-         CD(key='k.mux.extra_id',  label='subid'),
+         CD(key='k.mux.stream_id',  label='isi'),
+         CD(key='k.mux.t2mi_pid',  label='t2mi'),
          CD(key='encrypted',  label='Encrypted', dfn=bool_fn),
          CD(key='expired',  label='Expired',  dfn=bool_fn),
          CD(key='media_mode',  label='type', dfn=lambda x: lastdot(x)),
@@ -326,7 +329,11 @@ class ServiceGridBase(NeumoGridBase):
     def CmdBouquetAddService(self, evt):
         row = self.GetGridCursorRow()
         service = self.table.screen.record_at_row(row)
-        dtdebug(f'request to add service {service} to {self.app.frame.bouquet_being_edited}')
+        if self.app.frame.bouquet_being_edited is None:
+            dtdebug(f'request to add service {service} to bouquet={self.app.frame.bouquet_being_edited} IGNORED')
+            return
+        else:
+            dtdebug(f'request to add service {service} to {self.app.frame.bouquet_being_edited}')
         wtxn =  wx.GetApp().chdb.wtxn()
         assert self.app.frame.bouquet_being_edited is not None
         pychdb.chg.toggle_service_in_bouquet(wtxn, self.app.frame.bouquet_being_edited, service)

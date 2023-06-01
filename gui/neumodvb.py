@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2021 deeptho@gmail.com
+# Neumo dvb (C) 2019-2023 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -551,7 +551,7 @@ class NeumoGui(wx.App):
             txn = self.chdb.rtxn()
             self.sats = pychdb.sat.list_all_by_key(txn)
             del txn
-            if len(self.sats) == 0 and not retry:
+            if len(self.sats) <= 2 and not retry:
                 from neumodvb.init_db import init_db
                 init_db()
             else:
@@ -607,6 +607,21 @@ class NeumoGui(wx.App):
 
     def __init__(self, *args, **kwds):
         self.receiver = pyreceiver.receiver_t(options.receiver)
+        if self.receiver.db_upgrade_info is not None:
+            i = self.receiver.db_upgrade_info
+            from neumodvb.upgrade.upgrade import major_upgrade
+            dtdebug(f'Need db upgrade from {i.stored_db_version} to {i.current_db_version}')
+            ret, msg = major_upgrade(i.stored_db_version, i.current_db_version)
+            if ret:
+                if self.receiver.init():
+                    print(f'Major upgrade from {i.stored_db_version} to {i.current_db_version} SUCCEEDED')
+                    dtdebug(msg)
+                else:
+                    sys.exit(-1)
+            else:
+                dterror(msg)
+                print(msg)
+                sys.exit(-1)
         self.currently_selected_rec = None
         self.currently_selected_spectrum = None
         self.live_service_screen = LiveServiceScreen(self)
@@ -622,7 +637,7 @@ class NeumoGui(wx.App):
             self.presLan_fr.install()
             self.wxLocale('FR')
         self.global_subscriber_ = pyreceiver.global_subscriber(self.receiver, self.frame) #catch global error messages
-
+        self.get_sats() #force create sat table of it does not exist
     @property
     def scan_subscriber(self):
         if self.scan_subscriber_ is None:
@@ -653,14 +668,14 @@ class NeumoGui(wx.App):
 
     def MuxScan(self, muxlist):
         ret = self.scan_subscriber.scan_muxes(muxlist)
-        print(f'MuxScan')
+        dtdebug(f'MuxScan')
         if ret < 0:
             from neumodvb.neumo_dialogs import ShowMessage
             ShowMessage("Muxscan failed", self.scan_subscriber.error_message) #todo: record error message
         dtdebug(f"Requested subscription to scan mux {muxlist}")
 
     def MuxScanStop(self):
-        print(f'MuxScanStop')
+        dtdebug(f'MuxScanStop')
         if self.scan_subscriber_ is not None:
             self.scan_subscriber.unsubscribe()
             #TODO => what about subscription ids?
