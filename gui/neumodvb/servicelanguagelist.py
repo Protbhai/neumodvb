@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -81,14 +81,6 @@ class LanguageTable(NeumoTable):
             noresize=False, example='Languagexxxx')
         ]
 
-    def InitialRecord(self):
-        if self.for_subtitles:
-            ret= self.mpv_player.get_current_subtitle_language()
-        else:
-            ret = self.mpv_player.get_current_audio_language()
-        dtdebug(f"POPUP initial lang={ret}")
-        return ret
-
     def __init__(self, parent, mpv_player, for_subtitles=False, basic=False, *args, **kwds):
         initial_sorted_column = 'lang1'
         data_table= pychdb.language_code
@@ -108,22 +100,32 @@ class LanguageTable(NeumoTable):
         self.screen = screen_if_t(service_language_screen_t(self), self.sort_order==2)
 
 class LanguageGrid(NeumoGridBase):
-    def __init__(self, dialog, parent, basic, readonly, *args, dark_mode=False, **kwds):
+    def __init__(self, dialog, parent, basic, readonly, *args, dark_mode=False, for_subtitles=False,
+                 **kwds):
         self.dark_mode = True
         self.parent = parent
         self.dialog = dialog
         self.dark_mode = dark_mode
         mpv = wx.GetApp().current_mpv_player
-        table = LanguageTable(self, mpv)
+        table = LanguageTable(self, mpv, for_subtitles= for_subtitles)
         assert readonly
         assert basic
         super().__init__(basic, readonly, table, *args, dark_mode=dark_mode, fontscale=1.5, **kwds)
         self.sort_order = 0
         self.sort_column = None
         self.selected_row = None if self.table.GetNumberRows() == 0 else 0
+        self.for_subtitles = for_subtitles
         self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
         gtk_add_window_style(self, 'language_grid')
         set_gtk_window_name(self, 'language_grid')
+
+    def InitialRecord(self):
+        if self.for_subtitles:
+            ret= self.table.mpv_player.get_current_subtitle_language()
+        else:
+            ret = self.table.mpv_player.get_current_audio_language()
+        dtdebug(f"POPUP initial lang={ret}")
+        return ret
 
     def OnKeyDown(self, evt):
         keycode = evt.GetKeyCode()

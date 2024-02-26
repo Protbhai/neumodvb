@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -22,7 +22,7 @@ import wx
 
 from neumodvb.util import dtdebug, dterror
 #menu item
-MI = namedtuple('MenuItemDesc', 'name label help kind', defaults=[None, "", wx.ITEM_NORMAL])
+MI = namedtuple('MenuItemDesc', 'name label help kind start_disabled', defaults=[None, "", wx.ITEM_NORMAL, False])
 
 #menu
 MENU = namedtuple('MenuDesc', 'name, label entries')
@@ -57,8 +57,18 @@ view_menu = (
 
 
 control_menu = (
-    MI("Inspect",  _("Inspect"), ""),
-    #MI("PlayFile",  _("PlayFile"), ""),
+    MI("Tune",  _("&Tune\tCtrl-Enter"), ""),
+    MI("TuneAdd",  _("&Tune - Add\tShift-Ctrl-Enter"), ""),
+    MI("Play",  _("&Play\tCtrl-Enter"), ""),
+    MI("Play Add",  _("&Play- Add\tShift-Ctrl-Enter"), ""),
+    SEP,
+    MI("AddStream",  _("&Add Stream\tCtrl-K"), ""),
+    SEP,
+    MI("ToggleRecord", _("&Record\tCtrl-R"), ""),
+    MI("AutoRec", _("&Create Auto record\tCtrl-G"), ""),
+)
+
+play_menu = (
     MI("Pause",  _("&Pause\tCtrl-Space"), ""),
     MI("Stop",  _("&Stop\tCtrl-X"), ""),
     MI("JumpBack",  _("&Back\tLeft"), ""),
@@ -66,23 +76,24 @@ control_menu = (
     SEP,
     MI("AudioLang",  _("&Audio language\tCtrl-Shift-3"), ""), #ctrl-#
     MI("SubtitleLang",  _("&Subtitle language\tCtrl-T"), ""),
-    MI("DumpSubs",  _("&DumpSubs\tCtrl-G"), ""),
     MI("ChannelScreenshot",  _("&ChannelScreenhot\tCtrl-J"), ""),
     MI("ToggleOverlay",  _("&Toggle overlay\tCtrl-O"), ""),
     SEP,
-    MI("Tune",  _("&Tune\tCtrl-Enter"), ""),
-    MI("TuneAdd",  _("&Tune - Add\tShift-Ctrl-Enter"), ""),
+    MI("VolumeUp", _("&Volume Up\t="), ""),
+    MI("VolumeDown", _("&Volume Down\t-"), "")
+)
+
+dx_menu = (
+    MI("Inspect",  _("Inspect"), ""),
+    #MI("PlayFile",  _("PlayFile"), ""),
     MI("SignalHistory",  _("&Signal History\tCtrl-H"), ""),
-    MI("Play",  _("&Play\tCtrl-Enter"), ""),
-    MI("Play Add",  _("&Play- Add\tShift-Ctrl-Enter"), ""),
+    SEP,
     MI("Scan",  _("&Scan\tCtrl-S"), ""),
+    MI("CreateScanCommand",  _("&Create Scan Command\tAlt-S"), ""),
+    SEP,
     MI("Spectrum",  _("&Spectrum\tCtrl-U"), _("Spectrum")),
     MI("Positioner",  _("&Positioner\tCtrl-P"), ""),
     SEP,
-    MI("ToggleRecord", _("&Record\tCtrl-R"), ""),
-    SEP,
-    MI("VolumeUp", _("&Volume Up\t="), ""),
-    MI("VolumeDown", _("&Volume Down\t-"), "")
 )
 
 edit_menu = (
@@ -97,9 +108,19 @@ edit_menu = (
        _("Edit Bouquet&\tAlt-B"),
        "",
        wx.ITEM_CHECK),
+    MI("EditCommandMode",
+       _("Edit Command&\tAlt-Q"),
+       "",
+       wx.ITEM_CHECK),
     MI("BouquetAddService",
        _("Bouquet add service&\tCtrl-M"),
-       ""),
+       "", start_disabled=True),
+    MI("CommandAddSat",
+       _("Command add sat&\tCtrl-M"),
+       "", start_disabled=True),
+    MI("CommandAddMux",
+       _("Command add mux&\tCtrl-M"),
+       "", start_disabled=True),
     MI("Delete",
        _("&Delete\tCtrl-D"),
        ""),
@@ -108,7 +129,11 @@ edit_menu = (
        ""),
     SEP,
     MI("Export",
-       _("&Export"),
+       _("&Export List"),
+       ""),
+    SEP,
+    MI("EditOptions",
+       _("&Edit Options\tCtrl-J"),
        "")
 )
 
@@ -123,25 +148,36 @@ lists_menu = (
     MI("DvbtMuxList",_("&DVB-T Muxes\tShift-Ctrl-T"), ""),
     SEP,
     MI("LnbList",_("&LNBs\tShift-Ctrl-L"), ""),
-    #MI("LnbNetworkList",_("&Networks\tShift-Ctrl-N"), ""),
+    MI("DishList",_("&Dishes\tShift-Ctrl-D"), ""),
     MI("SatList",_("&Satellites\tShift-Ctrl-A"), ""),
     MI("ChgList",_("&Bouquets\tShift-Ctrl-B"), ""),
     SEP,
     MI("FrontendList",_("&Frontends\tShift-Ctrl-F"), ""),
+    MI("StreamList",_("&Streams\tShift-Ctrl-E"), ""),
     SEP,
     MI("RecList",_("&Recordings\tCtrl-Shift-R"), _("recordings list")),
-    MI("SpectrumList",_("&Spectra\tCtrl-Shift-U"), _("Spectra list"))
+    MI("AutoRecList",_("&AutoRecs\tCtrl-Shift-G "), _("autorecordings list")),
+    MI("SpectrumList",_("&Spectra\tCtrl-Shift-U"), _("Spectra list")),
+    SEP,
+    MI("ScanCommandList",_("&Commands\tCtrl-Shift-Q"), _("Scan commands")),
+
 )
 
 main_menubar = (
     MENU('View',  _("&View"), view_menu),
+    MENU('PLay', _("&Play"), play_menu),
     MENU('Control', _("&Control"), control_menu),
+    MENU('DX', _("&DX"), dx_menu),
     MENU('Edit', _("&Edit"), edit_menu),
     MENU('Lists', _("&Lists"), lists_menu)
     )
 
 
 class NeumoMenuBar(wx.MenuBar):
+    """
+    menu items will be enabled provided that current panel has the method needed by the menu item
+
+    """
     def __init__(self, parent, *args, **kwds):
         super().__init__(*args, **kwds)
         self.parent = parent
@@ -159,14 +195,6 @@ class NeumoMenuBar(wx.MenuBar):
         ret = self.parent.get_panel_method(method_name)
         if ret is not None:
             return ret, 2
-        if False:
-            #The following is needed in case no window is focused
-            ret = getattr(self.parent.live_panel, method_name, None)
-            if ret:
-                return ret, 1
-            ret = getattr(self.parent, method_name, None)
-            if ret:
-                return ret, 0
         return None, -1
 
     def get_panel_method(self, method_name):
@@ -177,6 +205,8 @@ class NeumoMenuBar(wx.MenuBar):
         """
         principle: lookup in parent if it supports specific method
         """
+        if it.disabled: #menu item disabled because of some current state unrelated to specifically shown panel
+            return False
         if it.desc.name in  ['Stop', 'Inspect']:
             return True
         m = self.get_panel_method(f'Cmd{it.desc.name}')
@@ -280,6 +310,7 @@ class NeumoMenuBar(wx.MenuBar):
             else:
                 item = menu.Append(wx.ID_ANY, mi.label, mi.help, mi.kind)
                 item.desc = mi
+                item.disabled = item.desc.start_disabled
                 a = item.GetAccel()
                 self.items[mi.name] = (mi, item)
                 x = f'Cmd{mi.name}'
@@ -288,8 +319,7 @@ class NeumoMenuBar(wx.MenuBar):
                 #bindings will use the same value of x
                 self.Bind(wx.EVT_MENU, lambda evt, x=x, accel=accel_key: self.run_menu_command(x, accel, evt), item)
 
-        if menudesc in (control_menu, edit_menu):
-            menu.Bind(wx.EVT_MENU_OPEN, self.OnShow)
+        menu.Bind(wx.EVT_MENU_OPEN, self.OnShow)
         return menu
 
     def make_menubar(self):

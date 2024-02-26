@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -79,13 +79,25 @@ def get_config():
         if Path(f).exists():
             print(f'loading options from {f}')
             if config is None:
-                #config = ConfigObj(f, interpolation='template')
                 config = ConfigObj(f, interpolation=False)
             else:
-                #config.merge(ConfigObj(f, interpolation='template'))
                 config.merge(ConfigObj(f, interpolation=False))
     config.main.interpolation = 'Template'
     return config
+
+def save_config(configobj):
+    maindir_ = maindir()
+    configdir = '~/.config/neumodvb'
+    os.makedirs(os.path.expanduser(configdir), exist_ok=True)
+    filename = os.path.realpath(os.path.expanduser(f'{configdir}/neumodvb.cfg'))
+
+    #try:
+    print(f'saving options in {filename}')
+    with open(filename, 'wb') as f:
+        configobj.write(f)
+    #except:
+    #    print("Failed to save preferences")
+
 
 def getsubattr(o, k):
     parts = k.split('.')
@@ -120,21 +132,28 @@ def setsubattr_obj(o, k, val):
 class get_processed_options(object):
     """
     read paths and default options from various config files
-    Then overwritew options with cureent values stored in the database
-    However, paths are not stored in the database
+
+    Note that options will be  overwritten by values stored in the database.
+    This happens when  the receiver c++ object is created: it is passed the options object
+    that we read and construct here, only used to provide initial values for the database
+
+    Note that some options cannot be overriden by database values. For example, filesystem paths
+    are needed to locate the database and cannot be stored in the database
+
     """
     def __init__(self):
         relative_files = ('logconfig', 'gui', 'css', 'mpvconfig')
-        o =options_t()
-        c= get_config()
+        o = options_t()
+        c = get_config()
         cfg = get_configfile(c['LOGGING']['logconfig'])
+        o.upgrade_dir =  str(pathlib.Path(maindir(), 'upgrade'))
         set_logconfig(cfg)
         engine = TemplateInterpolation(c)
-        for sec in  ['PATHS', 'SCAM', 'LOGGING', 'CONFIG']:
+        for sec in  ['PATHS', 'LOGGING', 'CONFIG']:
             for k,v in c[sec].items():
                 if k in relative_files:
                     v = get_configfile(v)
-                if hasattr(o, k):
+                if hasattr(o, k) and v is not None:
                     old = getattr(o,k)
                     v = os.path.expanduser(v)
                     dtdebug(f'changing receiver option {k} from default {old} to {v}')
@@ -142,21 +161,6 @@ class get_processed_options(object):
                     setattr(self, k, type(old)(v))
                 else:
                     setattr(self, k, v)
-
-        for sec in  ['RECORD', 'TIMESHIFT']:
-            for k,v in c[sec].items():
-                try:
-                    old = getsubattr(o,k)
-                    dtdebug(f'changing receiver option {k} from default {old} to {v}')
-                    if type(old) == timedelta:
-                        v = parse_time(v)
-                        setsubattr(o, k, v)
-                        setsubattr(self, k, v)
-                    else:
-                        setsubattr(o, k, type(old)(v))
-                        setsubattr_obj(self, k, type(old)(v))
-                except AttributeError:
-                    pass_dict
 
         self.receiver = o
 

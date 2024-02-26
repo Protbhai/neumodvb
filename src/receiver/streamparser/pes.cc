@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -90,7 +90,8 @@ bool pes_parser_t::parse_pes_header() {
 		}
 		toskip -= 10;
 #if 0
-		LOG4CXX_INFO(logger, "DIFF DTS-PCR=" << (dts - (pts_dts_t) event_handler.last_pcr) << " PCR=" << event_handler.last_pcr << " DTS=" << dts);
+		dtinfof("DIFF DTS-PCR={} PCR={} DTS={}", (dts - (pts_dts_t) event_handler.last_pcr),
+						event_handler.last_pcr, dts);
 #endif
 
 		break;
@@ -134,11 +135,11 @@ void h264_parser_t::parse_slice_header(int nal_unit_type) {
 	int colour_plane_id = 0;
 	if (separate_colour_plane_flag) {
 		colour_plane_id = this->get_bits(byte, startbit, 2);
-		LOG4CXX_DEBUG(logger, "colour_plane_id=" << colour_plane_id);
+		dtdebugf("colour_plane_id={}", colour_plane_id);
 	}
 
 	auto frame_num UNUSED = this->get_bits(byte, startbit, log2_max_frame_num_minus4 + 4);
-	LOG4CXX_INFO(logger, "frame_num= " << frame_num);
+	dtinfof("frame_num={}", frame_num);
 	int field_pic_flag = 0;
 	int bottom_field_flag = 0;
 	if (!frame_mbs_only_flag) {
@@ -191,14 +192,14 @@ void h264_parser_t::parse_payload_unit() {
 		For any non-zero value, the larger the value, the more the importance of the NAL unit.
 	*/
 	if (nal_ref_idc > 0)
-		dtdebugx("Possible reference field: ref_idx=%d", nal_ref_idc);
+		dtdebugf("Possible reference field: ref_idx={:d}", nal_ref_idc);
 
 	if (nal_unit_type != NAL_AUD) { // Access unit delimiter
 		/*
 			See T-REC-H.264-201704-I!!PDF-E.pdf p. 92  figure 7-1
 			Either there is an access unit delimiter or a SEI at the start
 		*/
-		dtdebugx("nal_unit_type!=NAL_AUD: 0x%x", nal_unit_type);
+		dtdebug_nicef("nal_unit_type!=NAL_AUD: 0x{:x}", nal_unit_type);
 		RETURN_ON_ERROR;
 	}
 	// NAL_AUD means  access_unit_delimiter_rbsp( )
@@ -224,7 +225,7 @@ void h264_parser_t::parse_payload_unit() {
 	// See http://yumichan.net/video-processing/video-compression/introduction-to-h264-2-sodb-vs-rbsp-vs-ebsp/
 	uint8_t rbsp = primary_pic_type & 0x1f;
 	if (rbsp != 0x10) { // 5 trailing bits; first should be 1; rest zero
-		dtdebugx("rbsp != 0x10: 0x%x", rbsp);
+		dtdebugf("rbsp != 0x10: 0x{:x}", rbsp);
 		THROW_BAD_DATA;
 	}
 	primary_pic_type >>= 5;
@@ -246,7 +247,7 @@ void h264_parser_t::parse_payload_unit() {
 		if (has_pts()) {
 		} else {
 #ifndef NDEBUG
-			dtdebug("Unexpected: I-frame without pts");
+			dtdebugf("Unexpected: I-frame without pts");
 #endif
 			THROW_BAD_DATA;
 		}
@@ -281,7 +282,7 @@ void h264_parser_t::parse_payload_unit() {
 			parse_sps(nal_unit_type);
 			break;
 		default:
-			LOG4CXX_DEBUG(logger, "Unhandled nal unit type: " << (int) nal_unit_type);
+			dtdebugf("Unhandled nal unit type: {}", (int) nal_unit_type);
 
 
 		}
@@ -331,8 +332,8 @@ void dtdemux::mpeg2_parser_t::parse_payload_unit() {
 			auto picture_coding_type = ((temporal_reference >> 3) & 7);
 			auto frame_type = stream_type::mpeg2_frame_type(picture_coding_type);
 #if 0
-			LOG4CXX_DEBUG(logger, current_ts_packet->range << ": " << pts << ": "
-										<< (char) frame_type << "-frame: temporal ref=" << temporal_reference);
+			dtdebugf("{}: {}: {}-frame: temporal ref={}", current_ts_packet->range, pts,
+							 (char) frame_type, temporal_reference);
 #endif
 			this->current_unit_type = frame_type;
 #ifndef NDEBUG
@@ -360,9 +361,10 @@ void dtdemux::mpeg2_parser_t::parse_payload_unit() {
 			auto aspect_ratio = aspect_ratio_code < sizeof(aspect_ratios) / sizeof(aspect_ratios[0])
 				? aspect_ratios[aspect_ratio_code]
 				: "invalid";
-			LOG4CXX_DEBUG(logger, current_ts_packet->range << ": " << pts << ": "
-										<< "SEQ header: frame_rate=" << frame_rate
-										<< " aspect_ratio=" << aspect_ratio);
+#if 0
+			dtdebugf("{}: {}: SEQ header: frame_rate={} aspect_ratio={}", current_ts_packet->range, pts,
+							 frame_rate, aspect_ratio);
+#endif
 			this->skip(3);																	// bit_rate and part of vbv_buffer_size
 			uint8_t quantiser_flags = this->get<uint8_t>(); /* 5 bits of vbv_buffer_size,
 																												 1 bit constrained_parameter_flags
@@ -374,14 +376,18 @@ void dtdemux::mpeg2_parser_t::parse_payload_unit() {
 			if (load_intra_quantiser_matrix) {
 				this->skip(63);
 				quantiser_flags = this->get<uint8_t>();
+#if 0
 				// load_non_intra_quantiser_matrix is now again the last (=least significant) bit of quantiser_flags
 				LOG4CXX_DEBUG(logger, "Sequence header: skipped intra quantiser matrix");
+#endif
 			}
 			bool load_non_intra_quantiser_matrix = quantiser_flags & 0x01;
 			if (load_non_intra_quantiser_matrix) {
 				this->skip(64);
+#if 0
 				// load_non_intra_quantiser_matrix is now again the last (=least significant) bit of quantiser_flags
 				LOG4CXX_DEBUG(logger, "Sequence header: skipped non-intra quantiser matrix");
+#endif
 			}
 			continue;
 
@@ -402,9 +408,11 @@ void dtdemux::mpeg2_parser_t::parse_payload_unit() {
 			bool closed_gop = time_code & 0x40;
 			bool broken_link = time_code & 0x20;
 			time_code >>= 7; // time code is for video recorders
+#if 0
 			LOG4CXX_DEBUG(logger, current_ts_packet->range << ": " << pts << ": "
 										<< "GOP header: closed_gop=" << closed_gop
 										<< " broken_link=" << broken_link);
+#endif
 			/*There may be optional fields with additional start codes 0xb5.
 				Search for the next different start code
 			*/
@@ -418,9 +426,9 @@ void dtdemux::mpeg2_parser_t::parse_payload_unit() {
 				break;
 			else if (code >= 0xB9 && code < 0xff) { // system start codes
 			} else if (code == 0xB2) {							// user data
-				LOG4CXX_DEBUG(logger, "user data start code: " << (int)code);
+				dtdebugf("user data start code: {}", (int)code);
 			} else {
-				LOG4CXX_DEBUG(logger, "unrecognised start code: " << (int)code);
+				dtdebugf("unrecognised start code: {}", (int)code);
 			}
 		}
 		}
@@ -466,7 +474,7 @@ void pes_parser_t::unit_completed_cb() {
 
 	*/
 #if 0
-	dtdebugx("INDEX: %c: [%ld, %ld[", 	(char)current_unit_type, current_unit_start_bytepos,
+	dtdebugf("INDEX: %c: [{:d}, {:d}[", 	(char)current_unit_type, current_unit_start_bytepos,
 					 current_unit_end_bytepos);
 #endif
 	if (current_unit_type != stream_type::marker_t::illegal)
@@ -487,7 +495,7 @@ void dtdemux::audio_parser_t::parse_payload_unit() {
 		return;
 	on_pes_start();
 	if (pes_packet_len == 0) {
-		dterrorx("unexpected: pes_packet_len=0 in audio stream");
+		dterrorf("unexpected: pes_packet_len=0 in audio stream");
 	}
 	this->current_unit_type = stream_type::marker_t::pes_other;
 	this->skip(pes_packet_len - pes_header_data_len - 2 /*flags*/ - 1 /*pes_header_data_len*/);

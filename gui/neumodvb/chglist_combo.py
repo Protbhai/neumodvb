@@ -1,5 +1,4 @@
-#!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -28,7 +27,7 @@ import datetime
 from dateutil import tz
 import regex as re
 
-from neumodvb.util import setup, lastdot
+from neumodvb.util import setup, lastdot, find_parent_prop, wxpythonversion, wxpythonversion42
 from neumodvb import neumodbutils
 from neumodvb.neumolist import GridPopup
 from neumodvb.chglist import BasicChgGrid
@@ -60,10 +59,6 @@ class ChgGridPopup(BasicChgGrid):
     def EditMode(self):
         return  False
 
-    def OnDoneOFF(self, rec):
-        self.controller.SelectChg(rec)
-        self.controller.SetFocus()
-
     def GetItemText(self, rowno):
         rec = self.table.GetValue(rowno, None)
         return str(rec)
@@ -77,7 +72,7 @@ class ChgListComboCtrl(wx.ComboCtrl):
         self.example = 'BySkyB Bouquet 12 - commercial scotland'+' '*8
         self.font_dc =  wx.ScreenDC()
         self.font = self.GetFont()
-        self.font.SetPointSize(self.font.GetPointSize()+6)
+        self.font.SetPointSize(self.font.GetPointSize()+ (6 if wxpythonversion < wxpythonversion42 else 1))
         self.SetFont(self.font)
         self.font_dc.SetFont(self.font) # for estimating label sizes
         self.popup = GridPopup(ChgGridPopup)

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -18,16 +18,13 @@
 #
 import os
 import sys
-import os
-import wx.glcanvas #needed for the created mpvglcanvas
-import wx
 import gettext
 import signal
 from functools import lru_cache
 #the following import also sets up import path
 import neumodvb
 
-from neumodvb.util import load_gtk3_stylesheet, dtdebug, dterror, maindir, get_object
+from neumodvb.util import load_gtk3_stylesheet, dtdebug, dterror, maindir, get_object, get_last_scan_text_dict
 from neumodvb.config import options, get_configfile
 from neumodvb.neumo_dialogs import ShowMessage
 
@@ -39,6 +36,9 @@ import pystatdb
 import pyneumompv
 import pyreceiver
 pyneumompv.init_threads()
+
+import wx.glcanvas #needed for the created mpvglcanvas
+import wx
 
 from neumodvb.viewer_gui import mainFrame
 import time
@@ -62,7 +62,6 @@ class neumoMainFrame(mainFrame):
         super().__init__(*args, **kwds)
         from neumodvb.neumomenu import NeumoMenuBar
         self.main_menubar = NeumoMenuBar(self)
-        self.main_menubar.epg_record_menu_item = self.main_menubar.get_menu_item('ToggleRecord')
         self.main_menubar.edit_mode_checkbox = self.main_menubar.get_menu_item('EditMode')
         self.main_menubar.on_new = self.main_menubar.get_menu_item('New')
         self.edit_menu = self.main_menubar.get_menu('Edit')
@@ -74,24 +73,20 @@ class neumoMainFrame(mainFrame):
         self.dvbt_muxgrid.infow = self.dvbt_muxinfo_text
         self.servicegrid.infow = self.serviceinfo_text
         self.chgmgrid.infow = self.chgminfo_text
-        self.bouquet_being_edited=None
-        self.panels = [
-            self.servicelist_panel,
-            self.chgmlist_panel,
-            self.chepg_panel, self.live_panel,
-            self.dvbs_muxlist_panel, self.dvbc_muxlist_panel, self.dvbt_muxlist_panel,
-            self.lnblist_panel,
-            self.chglist_panel,
-            self.satlist_panel, self.frontendlist_panel, self.statuslist_panel,
-            self.mosaic_panel,
-            self.reclist_panel, self.spectrumlist_panel]
-        self.grids = [
-            self.servicegrid, self.chgmgrid,
-            self.recgrid, self.spectrumgrid, self.chepggrid,
-            self.dvbs_muxgrid, self.dvbc_muxgrid, self.dvbt_muxgrid,
-            self.lnbgrid,
-            self.satgrid, self.chggrid, self.frontendgrid, self.statusgrid
-        ]
+        self.bouquet_being_edited = None
+        self.command_being_edited = None
+        self.panel_names = [ 'servicelist', 'chgmlist',
+                             'chepg', 'live',
+                             'dvbs_muxlist', 'dvbc_muxlist', 'dvbt_muxlist',
+                             'lnblist', 'chglist', 'satlist',
+                             'frontendlist', 'streamlist', 'statuslist',
+                             'mosaic', 'reclist', 'autoreclist', 'spectrumlist',
+                             'dishlist', 'scancommandlist']
+
+        self.panels = [ getattr(self, f'{n}_panel') for n in self.panel_names]
+        self.grids = [*filter(lambda xx: xx is not None,
+                            [ getattr(self, f'{n.removesuffix("list")}grid',None) for n in self.panel_names])]
+
         for grid in self.grids:
             panel = grid
             while panel is not None:
@@ -109,7 +104,7 @@ class neumoMainFrame(mainFrame):
         self.previous_panels_onscreen=[]
         self.previous_info_windows_onscreen = []
         self.info_windows_onscreen = []
-        self.info_windows = [self.chepginfo_text, self.recinfo_text]
+        self.info_windows = [self.recinfo_text]
         self.app = wx.GetApp()
         self.mosaic_sizer = wx.GridSizer(cols=1)
         parent_sizer = self.mosaic_panel.GetSizer()
@@ -162,23 +157,26 @@ class neumoMainFrame(mainFrame):
 
     def OnSubscriberCallback(self, evt):
         data = get_object(evt)
-        if type(data) == pyreceiver.scan_stats_t:
+        if type(data) == pydevdb.scan_stats.scan_stats:
             st = data
-        elif type(data) == pyreceiver.scan_report_t:
-            st = data.scan_stats
         elif type(data) == str:
             ShowMessage("Error", data)
             return
         else:
             st = None
         if st is not None:
-            done = st.pending_muxes + st.active_muxes == 0
-            pending = st.pending_muxes
+            self.app.scan_in_progress = not st.finished
+            pending = st.pending_muxes + st.pending_peaks
             ok = st.locked_muxes
-            active = st.active_muxes
-            self.app.scan_in_progress = pending+active > 0
-            self.app.last_scan_text = f" ok={ok} failed={st.failed_muxes} pending={pending} active={active}" \
-                if self.app.scan_in_progress else None
+            if not self.app.scan_in_progress:
+                self.app.last_scan_text_dict={}
+                msgs=[]
+                msgs.append(f"Scanned {st.locked_muxes+st.failed_muxes} muxes (ok={st.locked_muxes} "
+                            f"failed={st.failed_muxes})")
+                ShowMessage("Mux scan finished", "\n".join(msgs))
+            else:
+                self.app.last_scan_text_dict = get_last_scan_text_dict(st)
+
             panel =self.current_panel()
             if panel is None:
                 return
@@ -223,21 +221,15 @@ class neumoMainFrame(mainFrame):
                 window.Hide()
             else:
                 window.Show()
-        items_to_toggle= {}
         for panel in self.panels:
             if panel not in panelstoshow:
-                self.EnablePanelSpecificMenus(panel, items_to_toggle, False)
                 panel.Hide()
             else:
                 panel.Show()
-                self.EnablePanelSpecificMenus(panel, items_to_toggle, True)
                 if hasattr(panel, 'main_grid'):
                     panel.main_grid.SetFocus()
                 else:
                     wx.CallAfter(panel.SetFocus)
-        for item_name, onoff in items_to_toggle.items():
-            item = getattr(self.main_menubar, item_name)
-            item.Enable(onoff)
         if self.live_panel in panelstoshow:
             self.set_accelerators(True)
         else:
@@ -260,14 +252,8 @@ class neumoMainFrame(mainFrame):
             menu = self.edit_menu
             self.EnableMenu(self.edit_menu, edit_mode, skip_items=[self.main_menubar.edit_mode_checkbox, self.main_menubar.on_new])
 
-    def EnablePanelSpecificMenus(self, panel, items_to_toggle, onoff):
-        if(hasattr(panel, 'grid')):
-           for item_name in panel.grid.grid_specific_menu_items:
-               #always turn item on when onoff==True else turn it off, unless it is turned on
-               items_to_toggle[item_name] = onoff if onoff else items_to_toggle.get(item_name, False)
-
     def Stop(self):
-        self.app.MuxScanStop()
+        self.app.ScanStop()
         self.app.current_mpv_player.stop_play()
 
     def colPopupOFF(self, col, evt):
@@ -312,7 +298,6 @@ class neumoMainFrame(mainFrame):
         return
 
     def OnTimer(self, evt):
-        #self.parent.OnTimer(evt)
         panel =self.current_panel()
         if panel is None:
             return
@@ -324,9 +309,8 @@ class neumoMainFrame(mainFrame):
     def OnClose(self, event):
         dtdebug(f'closing veto={event.CanVeto()}')
         self.timer.Stop()
-        self.OnExit()
+        wx.CallAfter(self.OnExit)
         dtdebug('Calling Destroy')
-        #self.Destroy()
         dtdebug('closing done')
         event.Skip(True)
 
@@ -357,7 +341,6 @@ class neumoMainFrame(mainFrame):
                 return panel.grid.OnRefresh(event)
             else:
                 return panel.OnRefresh(event)
-        assert 0
 
     def OnExit(self, event=None):
         dtdebug(f"Asking receiver to exit receiver={self.app.receiver}")
@@ -369,9 +352,11 @@ class neumoMainFrame(mainFrame):
         dtdebug("CmdInspect")
         self.app.CmdInspect()
 
-    def CmdChannelScreenshot(self, event):
-        dtdebug("CmdChannelScreenshot")
-        self.app.current_mpv_player.screenshot()
+    def CmdEditOptions(self, event):
+        dtdebug("CmdEditOptions")
+        from neumodvb.preferences_dialog import show_preferences_dialog
+        show_preferences_dialog(self)
+        pass
 
     def CmdLiveChannels(self, event):
         dtdebug("CmdLiveChannels")
@@ -391,7 +376,7 @@ class neumoMainFrame(mainFrame):
         self.live_panel.CmdLiveRecordings(event)
 
     def FullScreen(self):
-        dtdebug("CmdFullScreen")
+        dtdebug("FullScreen")
         if not self.IsFullScreen():
             if self.current_panel() == self.live_panel:
                 self.ShowPanel([self.live_panel])
@@ -407,7 +392,7 @@ class neumoMainFrame(mainFrame):
 
     def CmdChEpg(self, event):
         dtdebug("CmdChEpg")
-        self.ShowPanel([self.chepg_panel, self.mosaic_panel], info_windows=self.chepginfo_text)
+        self.ShowPanel([self.chepg_panel, self.mosaic_panel])
 
     def CmdLiveEpg(self, evt):
         dtdebug("CmdLiveEpg")
@@ -446,6 +431,10 @@ class neumoMainFrame(mainFrame):
         dtdebug("CmdLnbList")
         self.ShowPanel(self.lnblist_panel)
 
+    def CmdDishList(self, event):
+        dtdebug("CmdDishList")
+        self.ShowPanel(self.dishlist_panel)
+
     def CmdSatList(self, event):
         dtdebug("CmdSatList")
         self.ShowPanel(self.satlist_panel)
@@ -458,48 +447,26 @@ class neumoMainFrame(mainFrame):
         dtdebug("CmdFrontendList")
         self.ShowPanel(self.frontendlist_panel)
 
+    def CmdStreamList(self, event):
+        dtdebug("CmdStreamList")
+        self.ShowPanel(self.streamlist_panel)
+
     def CmdRecList(self, event):
         dtdebug("CmdRecList")
         self.ShowPanel(self.reclist_panel)
 
-    def CmdNew(self, event):
-        dtdebug("CmdNew")
-        if not self.edit_mode:
-            self.SetEditMode(True)
-        panel = self.current_panel()
-        if panel is not None:
-            return panel.grid.OnNew(event)
-        assert 0
+    def CmdAutoRecList(self, event):
+        dtdebug("CmdAutoRecList")
+        self.ShowPanel(self.autoreclist_panel)
 
-    def CmdScan(self, event):
-        dtdebug('CmdScan')
-        panel = self.current_panel()
-        if panel in (self.dvbs_muxlist_panel, self.dvbc_muxlist_panel, self.dvbt_muxlist_panel):
-            panel.grid.CmdScan(event)
-        else:
-            dterror(f"Scanning on bad panel {panel}")
-
-    def CmdPause(self, event):
-        dtdebug('CmdPause')
-        return wx.GetApp().Pause()
-
-    def CmdToggleOverlay(self, event):
-        dtdebug('CmdToggleOverlay')
-        return wx.GetApp().ToggleOverlay()
+    def CmdScanCommandList(self, event):
+        dtdebug("CmdScanCommandList")
+        self.ShowPanel(self.scancommandlist_panel)
 
     def CmdStop(self, event):
         dtdebug('CmdStop')
         return wx.GetApp().Stop()
 
-    def CmdAudioLang(self, event):
-        dtdebug('CmdAudioLang')
-        dark_mode = self.current_panel() == self.live_panel
-        return wx.GetApp().AudioLang(dark_mode)
-
-    def CmdSubtitleLang(self, event):
-        dtdebug('CmdSubtitleLang')
-        dark_mode = self.current_panel() == self.live_panel
-        return wx.GetApp().SubtitleLang(dark_mode)
     def CmdExit(self, event):
         dtdebug("CmdExit")
         if self.current_panel() != self.live_panel:
@@ -513,25 +480,11 @@ class neumoMainFrame(mainFrame):
         self.SetEditMode(is_checked)
         return True
 
-    def CmdDelete(self, event):
-        dtdebug("CmdDelete")
-        panel = self.current_panel()
-        if panel is not None and hasattr(panel, 'grid'):
-            return panel.grid.OnDelete(event)
-        return False
-
     def CmdUndo(self, event):
         dtdebug("CmdUndo")
         panel = self.current_panel()
         if panel is not None and hasattr(panel, 'grid'):
             return panel.grid.OnUndo(event)
-
-    def CmdToggleRecord(self, event):
-        dtdebug("CmdToggleRecord")
-        m = self.get_panel_method('OnToggleRecord')
-        dtdebug(f'CmdToggleRecord: {m}')
-        if m is not None:
-            m(event)
 
 class NeumoBitmaps(object):
     def __init__(self):
@@ -546,6 +499,15 @@ class NeumoBitmaps(object):
 
 
 class NeumoGui(wx.App):
+    def save_option_to_db(self, par, val):
+        opts =  self.receiver.get_options()
+        if getattr(opts, par) != val:
+            devdb_wtxn = self.receiver.devdb.wtxn()
+            setattr(opts, par, val)
+            opts.save_to_db(devdb_wtxn)
+            devdb_wtxn.commit()
+            self.receiver.set_options(opts)
+
     def get_sats(self):
         for retry in False, True:
             txn = self.chdb.rtxn()
@@ -557,10 +519,28 @@ class NeumoGui(wx.App):
             else:
                 return self.sats
 
-    def get_cards(self):
+    def get_sat_poses(self):
+        sats= self.get_sats()
+        ret =[]
+        found = set()
+        for sat in sats:
+            if not sat.sat_pos in found:
+                found.add(sat.sat_pos)
+                ret.append(sat.sat_pos)
+        return ret
+
+    def get_dishes(self):
+        txn = self.devdb.rtxn()
+        self.dishes = pydevdb.dish.list_dishes(txn)
+        del txn
+        return self.dishes
+
+    def get_cards(self, available_only=False):
         txn = wx.GetApp().devdb.rtxn()
         ret={}
         for a in  pydevdb.fe.list_all_by_card_mac_address(txn):
+            if available_only and not a.can_be_used:
+                continue
             ret[f'C{a.card_no}: {a.card_short_name}' ] = a.card_mac_address
         txn.abort()
         return ret
@@ -605,6 +585,9 @@ class NeumoGui(wx.App):
     def statdb(self):
         return self.receiver.statdb
 
+    def get_menu_item(self, name):
+        return self.frame.main_menubar.get_menu_item(name)
+
     def __init__(self, *args, **kwds):
         self.receiver = pyreceiver.receiver_t(options.receiver)
         if self.receiver.db_upgrade_info is not None:
@@ -627,6 +610,7 @@ class NeumoGui(wx.App):
         self.live_service_screen = LiveServiceScreen(self)
         self.live_recording_screen_ = None
         self.scan_subscriber_ = None
+        self.stream_subscriber_ = None
         self.last_scan_text = ""
         self.scan_in_progress = False
         super().__init__(*args, **kwds)
@@ -638,11 +622,19 @@ class NeumoGui(wx.App):
             self.wxLocale('FR')
         self.global_subscriber_ = pyreceiver.global_subscriber(self.receiver, self.frame) #catch global error messages
         self.get_sats() #force create sat table of it does not exist
+
     @property
     def scan_subscriber(self):
         if self.scan_subscriber_ is None:
             self.scan_subscriber_ = pyreceiver.subscriber_t(self.receiver, self.frame)
         return self.scan_subscriber_
+
+
+    @property
+    def stream_subscriber(self):
+        if self.stream_subscriber_ is None:
+            self.stream_subscriber_ = pyreceiver.subscriber_t(self.receiver, self.frame)
+        return self.stream_subscriber_
 
     @property
     def live_recording_screen(self):
@@ -655,8 +647,11 @@ class NeumoGui(wx.App):
         return self.frame.live_panel.mosaic_panel.current_mpv_player
 
     def PlayRecording(self, rec):
-        self.current_mpv_player.play_recording(rec)
         dtdebug(f"SUBSCRIBED to recording {rec}")
+        ret = self.current_mpv_player.play_recording(rec)
+        if ret < 0:
+            from neumodvb.neumo_dialogs import ShowMessage
+            ShowMessage("Mux scan failed", self.scan_subscriber.error_message) #todo: record error message
 
     def ServiceTune(self, service_or_chgm, replace_running=True):
         self.frame.live_panel.ServiceTune(service_or_chgm, replace_running)
@@ -666,16 +661,32 @@ class NeumoGui(wx.App):
         self.current_mpv_player.play_mux(mux)
         dtdebug(f"Requested subscription to mux {mux}")
 
-    def MuxScan(self, muxlist):
-        ret = self.scan_subscriber.scan_muxes(muxlist)
+    def MuxScan(self, muxlist, tune_options=None):
+        ret = self.scan_subscriber.scan_muxes(muxlist, tune_options)
         dtdebug(f'MuxScan')
         if ret < 0:
             from neumodvb.neumo_dialogs import ShowMessage
-            ShowMessage("Muxscan failed", self.scan_subscriber.error_message) #todo: record error message
-        dtdebug(f"Requested subscription to scan mux {muxlist}")
+            ShowMessage("Mux scan failed", self.scan_subscriber.error_message) #todo: record error message
+        dtdebug(f"Requested subscription to scan muxes {muxlist}")
 
-    def MuxScanStop(self):
-        dtdebug(f'MuxScanStop')
+    def MuxesOnSatScan(self, satlist, tune_options, band_scan_options):
+        chdb_rtxn = self.receiver.chdb.rtxn()
+        dtdebug(f"MuxesOnSatScan: sats={satlist}")
+        ret = self.scan_subscriber.scan_muxes_on_sats(chdb_rtxn, satlist, tune_options, band_scan_options)
+        chdb_rtxn.commit()
+        if ret < 0:
+            from neumodvb.neumo_dialogs import ShowMessage
+            ShowMessage("Sat scan failed", self.scan_subscriber.error_message) #todo: record error message
+
+    def BandsOnSatScan(self, satlist, tune_options, band_scan_options):
+        dtdebug(f"BandsOnSatScan: sats={satlist}")
+        ret = self.scan_subscriber.scan_bands_on_sats(satlist, tune_options, band_scan_options)
+        if ret < 0:
+            from neumodvb.neumo_dialogs import ShowMessage
+            ShowMessage("Satellite bandscan failed", self.scan_subscriber.error_message) #todo: record error message
+
+    def ScanStop(self):
+        dtdebug(f'ScanStop')
         if self.scan_subscriber_ is not None:
             self.scan_subscriber.unsubscribe()
             #TODO => what about subscription ids?

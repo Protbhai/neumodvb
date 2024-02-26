@@ -21,17 +21,6 @@ db = db_db(gen_options)
 def lord(x):
     return  int.from_bytes(x.encode(), sys.byteorder)
 
-
-"""
-transponders are identified by the key:
-uint16_t: satpos
-uint16_t: nit_id
-uint16_t: ts_id
-uint16_t: extra_id; //use for cases where multiple transponders share the same ts_id
-                          //When adding a new mux, we always check the list and pick the next highest number
-
-"""
-
 list_filter_type = db_enum(name='list_filter_type_t',
                            db = db,
                            storage = 'int8_t',
@@ -92,6 +81,8 @@ tune_src = db_enum(name='tune_src_t',
                    fields=(
                        ('TEMPLATE', 0), #temporary values entered by user
                        ('NIT_TUNED', 1),      #mux has been tuned, confirming tuning parameters
+                                        #freq is value from nit, but some values overridden from driver
+                       ('NIT_CORRECTED', 7),      #mux has been tuned, confirming tuning parameters
                                         #freq is value from nit, but some values overridden from driver
 
                        ('NIT_ACTUAL', 2),     #mux has not been tuned
@@ -160,6 +151,32 @@ lock_result = db_enum(name='lock_result_t',
                        ('FEC', 4), #fec lock
                        ('SYNC', 5), #sync bytes received (dvbs2)
                    ))
+
+sat_band = db_enum(name='sat_band_t',
+                   db = db,
+                   storage = 'int8_t',
+                   type_id = 100,
+                   version = 1,
+                   fields=(('UNKNOWN', -1),
+                           'C',
+                           'Ku',
+                           'KaA',
+                           'KaB',
+                           'KaC',
+                           'KaD',
+                           'KaE',
+                           'Other'
+                           ))
+
+sat_sub_band = db_enum(name='sat_sub_band_t',
+                  db= db,
+                  storage = 'int8_t',
+                  type_id = 100,
+                  version = 1,
+                  fields = (('NONE',-1),
+	                          'LOW',
+	                          'HIGH'
+	                          ))
 
 fe_polarisation = db_enum(name='fe_polarisation_t',
               db = db,
@@ -507,9 +524,57 @@ fe_pls_mode = db_enum(name='fe_pls_mode_t',
             'COMBO',
         )))
 
+scan_id = db_struct(name='scan_id',
+                    fname = 'common',
+                    db = db,
+                    type_id= lord('MS'),
+                    version = 1,
+                    fields = ((1, 'int16_t', 'subscription_id', '-1'),
+                              (2, 'int16_t', 'opt_id', '-1'),
+                              (3, 'int32_t', 'pid', '-1'),
+                              ))
+
+#duplicated to prevent circular dependency which would arise if using devdb_rfpath
+scan_rf_path = db_struct(name='scan_rf_path',
+                         fname = 'common',
+                         db = db,
+                         type_id= lord('TC'),
+                         version = 1,
+                         fields = ((1, 'int16_t', 'lnb_id', '-1'), #-1 means: not set
+                                   (2, 'int64_t', 'card_mac_address', -1), #-1 means: not set
+                                   (3, 'int8_t', 'rf_input', -1), #-1 means: not set
+                                   (4, 'int8_t', 'dish_id'),
+                                )
+                         )
+
+band_scan = db_struct(name = 'band_scan',
+                      fname = 'common',
+                      db = db,
+                      type_id = lord('as'),
+                      version = 1,
+                      ignore_for_equality_fields = ('mtime',),
+                      fields = ((2, 'fe_polarisation_t', 'pol', 'fe_polarisation_t::NONE'),
+                                (10, 'sat_band_t', 'sat_band', 'sat_band_t::UNKNOWN'),
+                                (11, 'sat_sub_band_t', 'sat_sub_band', 'sat_sub_band_t::NONE'),
+                                (5, 'scan_status_t', 'scan_status',  'scan_status_t::NONE'),
+                                #(6, 'scan_status_t', 'mux_scan_status', 'scan_status_t::NONE'),
+                                (12, 'scan_result_t', 'scan_result',  'scan_result_t::NONE'),
+                                (7, 'scan_id_t', 'scan_id'),
+                                (9, 'scan_rf_path_t', 'scan_rf_path'),
+                                (8, 'time_t', 'scan_time')
+                                ))
+
+sat_sub_band_pol = db_struct(name='sat_sub_band_pol',
+                    fname = 'common',
+                    db = db,
+                    type_id= lord('_F'), #TODO: duplicate
+                    version = 1,
+                    fields = ((1, 'sat_sub_band_t', 'band', 'sat_sub_band_t::NONE'),
+                              (2, 'fe_polarisation_t', 'pol', 'chdb::fe_polarisation_t::NONE'),
+                              ))
 
 spectral_peak = db_struct(name='spectral_peak',
-                    fname = 'mux',
+                    fname = 'common',
                     db = db,
                     type_id= lord('sp'),
                     version = 1,
@@ -531,9 +596,9 @@ mux_key = db_struct(name='mux_key',
                     version = 1,
                     fields = ((1, 'int16_t', 'sat_pos', 'sat_pos_none'), #16000 DVBC 16001=DVBT
                               (2, 'int16_t', 'stream_id', '-1'),
-                              (5, 'int16_t', 't2mi_pid', -1), #we would brefer 0x1fff but this interferes
+                              (5, 'int16_t', 't2mi_pid', -1), #we would prefer 0x1fff but this interferes
                                                               #with using default key as lower bound in find functions
-                              (4, 'uint16_t', 'mux_id')
+                              (4, 'uint16_t', 'mux_id', '0')
                               ))
 
 
@@ -553,6 +618,8 @@ epg_type = db_enum(name='epg_type_t',
                            'VIASAT',
                            ))
 
+
+#temporary data used during scanning
 mux_common = db_struct(name='mux_common',
                     fname = 'mux',
                     db = db,
@@ -562,16 +629,17 @@ mux_common = db_struct(name='mux_common',
                     fields = ((1, 'time_t', 'scan_time'),
                               (3, 'scan_result_t', 'scan_result'),
                               (18, 'lock_result_t', 'scan_lock_result'),
+                              (19, 'int8_t', 'epg_scan_completeness'),
                               (8, 'time_t', 'scan_duration'),
                               (5, 'bool', 'epg_scan'),
                               (2, 'scan_status_t', 'scan_status', 'scan_status_t::NONE'),
-                              (12, 'uint32_t', 'scan_id', '0'),
+                              (20, 'scan_rf_path_t', 'scan_rf_path'),
+                              (12, 'scan_id_t', 'scan_id'),
                               (4, 'uint16_t', 'num_services'),
                               (16, 'uint16_t', 'network_id'), #usually redundant
                               (17, 'uint16_t', 'ts_id'), #usually redundant
                               (14, 'uint16_t', 'nit_network_id'), #usually redundant
                               (15, 'uint16_t', 'nit_ts_id'), #usually redundant
-
                               (11, 'tune_src_t', 'tune_src', 'tune_src_t::AUTO'),
                               (13, 'key_src_t', 'key_src', 'key_src_t::NONE'),
 
@@ -669,16 +737,18 @@ dvbt_mux = db_struct(name='dvbt_mux',
                           (12, 'mux_common_t', 'c')
                 ))
 
-
 sat = db_struct(name='sat',
                     fname = 'sat',
                     db = db,
                     type_id = ord('a'),
                     version = 1,
-                    primary_key = ('key', ('sat_pos',)), #unique
+                    primary_key = ('key', ('sat_pos', 'sat_band')), #unique
                     fields = ((1, 'int16_t', 'sat_pos', 'sat_pos_none'),
+                              (16, 'sat_band_t', 'sat_band', 'sat_band_t::UNKNOWN'),
+                              (19, 'ss::vector<band_scan_t,4>', 'band_scans'),
                               (2, 'ss::string<32>', 'name'),
                               (3, 'mux_key_t', 'reference_tp'),
+                              (13, 'time_t', 'mtime'),
                               ))
 
 language_code = db_struct(name='language_code',
@@ -732,7 +802,7 @@ service = db_struct(name ='service',
                             (15, 'uint32_t', 'frequency'),
                             (16, 'chdb::fe_polarisation_t',  'pol', 'chdb::fe_polarisation_t::NONE'),
                             (2, 'time_t', 'mtime'), #last seen or last updated?
-	                          (3, 'uint16_t', 'ch_order', '0'),
+                            (3, 'uint16_t', 'ch_order', '65535'),
                             (4, 'uint16_t', 'service_type', '0'),
                             (5, 'uint16_t', 'pmt_pid', 'null_pid'),
                             (6, 'media_mode_t', 'media_mode', 'chdb::media_mode_t::UNKNOWN'),
@@ -831,15 +901,16 @@ browse_history = db_struct(name ='browse_history',
               (2, 'list_filter_type_t', 'list_filter_type', 'list_filter_type_t::ALL_SERVICES'),
               (3, 'uint32_t', 'service_sort_order', '((uint32_t) service_t::subfield_t::ch_order)<<24'),
               (4, 'uint32_t', 'chgm_sort_order', '((uint32_t) chgm_t::subfield_t::chgm_order)<<24'),
-              (5, 'sat_t', 'filter_sat'),
-              (6, 'chg_t', 'filter_chg'),
+              (5, 'sat_t', 'servicelist_filter_sat'),
+              (6, 'chg_t', 'chgmlist_filter_chg'),
               (7, 'uint32_t', 'servicelist_sort_order', '((uint32_t) service_t::subfield_t::ch_order)<<24'),
               (8, 'uint32_t', 'chgmlist_sort_order', '((uint32_t) chgm_t::subfield_t::chgm_order)<<24'),
               (9, 'uint32_t', 'dvbs_muxlist_sort_order', '((uint32_t) chgm_t::subfield_t::chgm_order)<<24'),
               (10, 'uint32_t', 'dvbc_muxlist_sort_order', '((uint32_t) chgm_t::subfield_t::chgm_order)<<24'),
               (11, 'uint32_t', 'dvbt_muxlist_sort_order', '((uint32_t) chgm_t::subfield_t::chgm_order)<<24'),
-              (12, 'sat_t', 'servicelist_filter_sat'),
-              (13, 'chg_t', 'chgmlist_filter_chg'),
+              #(12, 'sat_t', 'servicelist_filter_sat'),
+              #(13, 'chg_t', 'chgmlist_filter_chg'),
+              (22, 'sat_band_t', 'satlist_filter_sat_band'),
               (14, 'sat_t', 'dvbs_muxlist_filter_sat'),
               (15, 'ss::vector<service_t,8>', 'services'),
               (16, 'ss::vector<chgm_t,8>', 'chgms'),
@@ -847,5 +918,5 @@ browse_history = db_struct(name ='browse_history',
               (18, 'ss::vector<chgm_t, 2>', 'cgmlist_chgms'),
               (19, 'ss::vector<dvbs_mux_t, 2>', 'dvbs_muxlist_muxes'),
               (20, 'ss::vector<dvbc_mux_t, 2>', 'dvbc_muxlist_muxes'),
-              (21, 'ss::vector<dvbt_mux_t, 2>', 'dvbt_muxlist_muxes'),
+              (21, 'ss::vector<dvbt_mux_t, 2>', 'dvbt_muxlist_muxes')
               ))

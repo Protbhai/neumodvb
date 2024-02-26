@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -59,6 +59,8 @@ using namespace chdb;
 		Returns must_tune, must_restart_si, must_stop_si, is_not_ts (boolean)
 */
 std::tuple<bool, bool, bool, bool> active_adapter_t::check_status() {
+	using namespace devdb;
+
 	if (!fe)
 		return {};
 	auto status = fe->get_lock_status();
@@ -69,30 +71,39 @@ std::tuple<bool, bool, bool, bool> active_adapter_t::check_status() {
 	int lock_lost = status.lock_lost;
 	bool must_tune = false;
 	bool relocked_now = false;
-	bool tune_failed = false;
+	bool tune_failed = status.fem_state == fem_state_t::FAILED;
 	lock_state.tune_lock_result = status.tune_lock_result();
 	lock_state.locked_normal = is_locked;
 	lock_state.locked_minimal = lock_state.tune_lock_result >= chdb::lock_result_t::CAR;
 	lock_state.temp_tune_failure = temp_tune_failure;
 	lock_state.is_not_ts = is_not_ts;
 	lock_state.is_dvb = is_dvb;
-	if(temp_tune_failure)
+	if(tune_failed)
+		tune_state = TUNE_FAILED;
+	else if(temp_tune_failure)
 		tune_state = TUNE_FAILED_TEMP;
 	switch (tune_state) {
 	case TUNE_INIT: {
 		assert(0);
 		must_tune = true;
 		isi_processing_done = false;
-		dtdebugx("Initial tuning");
+		dtdebugf("Initial tuning");
 	} break;
+	case TUNE_REQUESTED:
+		if (status.fem_state == fem_state_t::SEC_POWERED_UP ||
+				status.fem_state == fem_state_t::MONITORING) {
+			tune_state = WAITING_FOR_LOCK;
+			tune_start_time = system_clock_t::now();
+		}
+		break;
 	case LOCK_TIMEDOUT:
 	case WAITING_FOR_LOCK: {
 		if (lock_lost && is_locked) {
-			dtdebugx("Lock was lost; restarting si");
+			dtdebugf("Lock was lost; restarting si");
 			relocked_now = true;
 			isi_processing_done = false;
 		} else if (is_locked) {
-			dtdebugx("First lock detected");
+			dtdebugf("First lock detected");
 			tune_state = LOCKED;
 			relocked_now = true;
 			isi_processing_done = false;
@@ -100,7 +111,7 @@ std::tuple<bool, bool, bool, bool> active_adapter_t::check_status() {
 			if ((now - tune_start_time) >= tune_timeout && fe) {
 				auto retune_mode = fe->ts.readAccess()->tune_options.retune_mode;
 				if (retune_mode == retune_mode_t::AUTO) {
-					dtdebug("Timed out while waiting for lock; retuning for " << current_tp());
+					dtdebugf("Timed out while waiting for lock; retuning for {}", current_tp());
 					must_tune = true;
 				}
 				tune_state = LOCK_TIMEDOUT;
@@ -114,11 +125,16 @@ std::tuple<bool, bool, bool, bool> active_adapter_t::check_status() {
 	case LOCKED:
 		if (lock_lost) {
 			if (is_locked) {
-				dtdebugx("Lock was lost; restarting si");
-				relocked_now = true;
-				isi_processing_done = false;
+				dtdebugf("Lock was lost");
+				/*lock ws lost according to the driver, but our si processing is still running. This is to be distinghuished
+					from after retune, in which case we are in the WAITING_FOR_LOCK state, which would need starting si from scratch.
+					TODO: Instead, we should signal to our caller a new flag "reset_si", which is incompatible with must_tune and
+					with relocked_now, and which signifies: do not retune, but close si, and restart it. "reset_si" is not suitable
+					as it allso calls "on_scan_mux_end". During scanning, we also prefer not to restart si processing, as we could
+					end up which an andlessly repeating loop.
+				 */
 			} else {
-				dtdebug("tuner no longer locked; retuning for " << current_tp());
+				dtdebugf("tuner no longer locked; retuning mux={}", current_tp());
 				must_tune = true;
 				isi_processing_done = false;
 			}
@@ -130,74 +146,117 @@ std::tuple<bool, bool, bool, bool> active_adapter_t::check_status() {
 }
 
 int active_adapter_t::lnb_activate(const devdb::rf_path_t& rf_path,
-																	 const devdb::lnb_t& lnb, tune_options_t tune_options) {
-#if 0
-	scan_mux_end_reported = false;
-#endif
-	this->fe->start_fe_and_lnb(rf_path, lnb);
-
-	switch (tune_options.tune_mode) {
-	case tune_mode_t::SPECTRUM:
-		return lnb_spectrum_scan(rf_path, lnb, tune_options);
-	default:
-		assert(0);
-		//fall through
-	case tune_mode_t::POSITIONER_CONTROL: {
-		auto [ret, new_usals_sat_pos] = fe->diseqc(true /*skip_positioner*/);
-		if(new_usals_sat_pos != sat_pos_none)
-			lnb_update_usals_pos(new_usals_sat_pos, sat_pos_none);
-
-		if(ret<0) {
-			dterrorx("diseqc failed: err=%d", ret);
-			return ret;
-		}
-	}
-		break;
-	}
-	return 0;
+																	 const devdb::lnb_t& lnb, subscription_options_t tune_options) {
+	return this->fe->request_positioner_control(rf_path, lnb, tune_options);
 }
 
-int active_adapter_t::tune(const devdb::rf_path_t& rf_path,
-													 const devdb::lnb_t& lnb, const chdb::dvbs_mux_t& mux, tune_options_t tune_options,
-													 bool user_requested, const devdb::resource_subscription_counts_t& use_counts) {
+void active_adapter_t::reset()
+{
+	tune_state = TUNE_INIT;
+	processed_isis.reset();
+	isi_processing_done = false;
+	lock_state = {};
+	usals_timer = {};
+	si.close();
+}
+
+int active_adapter_t::retune(const devdb::rf_path_t& rf_path,
+															const devdb::lnb_t& lnb, const chdb::dvbs_mux_t& mux_,
+															const subscription_options_t tune_options, bool user_requested,
+															subscription_id_t subscription_id) {
+	chdb::dvbs_mux_t mux;
+
+	if(user_requested) {
+		this->reset();
+		mux = prepare_si(mux_, false /*start*/, subscription_id);
+	} else
+		mux = mux_;
 	if(!fe) {
-		dterror("Tune failed fe=null: mux=" << mux);
+		dterrorf("Tune failed fe=null: mux={}", mux);
 		return -1;
 	}
-	if(user_requested) {
-		tune_state = TUNE_INIT;
-	}
-#if 0
-	scan_mux_end_reported = false;
-#endif
+
+	this->tune_options = tune_options;
 	assert(tune_state != TUNE_FAILED);
-	auto [ret, new_usals_sat_pos] = fe->tune(rf_path, lnb, mux, tune_options, user_requested, use_counts);
-	if(ret>=0 && new_usals_sat_pos != sat_pos_none)
-		lnb_update_usals_pos(new_usals_sat_pos, mux.k.sat_pos);
-	auto tune_mode = fe->ts.readAccess()->tune_options.tune_mode;
-	tune_start_time = system_clock_t::now();
-	tune_state = ret<0 ? TUNE_FAILED: WAITING_FOR_LOCK;
-	dtdebugx("tune: done ret=%d tun_mode=%d\n", ret, (int) tune_mode);
+	fe->request_retune<chdb::dvbs_mux_t>(tuner_thread, user_requested);
+	tune_state = TUNE_REQUESTED;
+	auto ret=0;
 	return ret;
 }
+template<typename mux_t>
+int active_adapter_t::retune(const mux_t& mux_,
+														 const subscription_options_t tune_options, bool user_requested,
+														 subscription_id_t subscription_id) {
+	mux_t mux;
+
+	if(user_requested) {
+		this->reset();
+		mux = prepare_si(mux_, false /*start*/, subscription_id);
+	} else
+		mux = mux_;
+	if(!fe) {
+		dterrorf("Tune failed fe=null: mux={}", mux);
+		return -1;
+	}
+
+	this->tune_options = tune_options;
+	assert(tune_state != TUNE_FAILED);
+	fe->request_retune<mux_t>(tuner_thread, user_requested);
+	tune_state = TUNE_REQUESTED;
+	auto ret=0;
+	return ret;
+}
+
+int active_adapter_t::tune(const subscribe_ret_t& sret,
+													 const devdb::rf_path_t& rf_path,
+													 const devdb::lnb_t& lnb, const chdb::dvbs_mux_t& mux_,
+													 const subscription_options_t tune_options) {
+	chdb::dvbs_mux_t mux;
+
+	this->reset();
+	mux = prepare_si(mux_, false /*start*/, sret.subscription_id);
+
+	if(!fe) {
+		dterrorf("Tune failed fe=null: mux={}", mux);
+#ifdef NEWTUNE
+		return -1;
+#else
+		assert(false);
+#endif
+	}
+
+	this->tune_options = tune_options;
+	assert(tune_state != TUNE_FAILED);
+	if(sret.tune_pars.move_dish && sret.tune_pars.dish->cur_usals_pos != sret.tune_pars.dish->target_usals_pos) {
+		usals_timer.start(sret.tune_pars.dish->cur_usals_pos, sret.tune_pars.dish->target_usals_pos);
+	}
+	fe->request_tune(tuner_thread, rf_path, lnb, mux, tune_options);
+#ifdef NEWTUNE
+	tune_state = ret<0 ? TUNE_FAILED: WAITING_FOR_LOCK;
+	dtdebugf("Subscribed: subscription_id={:d} ret={:d}", (int) sret.subscription_id, ret);
+#else
+	tune_state = TUNE_REQUESTED;
+	dtdebugf("Subscribed: subscription_id={:d}", (int) sret.subscription_id);
+	auto ret=0;
+#endif
+	return ret;
+}
+
 
 template<>
 int active_adapter_t::retune<chdb::dvbs_mux_t>() {
 	auto mux = std::get<chdb::dvbs_mux_t>(current_tp());
-	bool user_requested = false;
 	devdb::lnb_t lnb;
-	devdb::resource_subscription_counts_t use_counts;
 	{
 		auto devdb_rtxn = receiver.devdb.rtxn();
 		auto rf_path = current_rf_path();
-		auto rf_coupler_id = current_rf_coupler_id();
-		use_counts = devdb::fe::subscription_counts(devdb_rtxn, rf_path, rf_coupler_id,
-																								nullptr /*fe_key_to_release*/);
 		devdb_rtxn.abort();
 	}
 	//TODO: needless read here, followed by write within tune()
 	auto tune_options = fe->ts.readAccess()->tune_options;
-	return tune(current_rf_path(), current_lnb(), mux, tune_options, user_requested, use_counts);
+	const bool user_requested = false;
+	return retune(current_rf_path(), current_lnb(), mux, tune_options,
+								 user_requested, subscription_id_t::NONE);
 }
 
 template <typename mux_t> inline int active_adapter_t::retune() {
@@ -206,33 +265,23 @@ template <typename mux_t> inline int active_adapter_t::retune() {
 
 	//TODO: needless read here, followed by write within tune()
 	auto tune_options = fe->ts.readAccess()->tune_options;
-	return tune(mux, tune_options, user_requested);
+	return retune(mux, tune_options, user_requested, subscription_id_t::NONE);
 }
 
-int active_adapter_t::restart_tune(const chdb::any_mux_t& mux) {
-	//TODO: needless read here, followed by write within tune()
-	auto tune_options = fe->ts.readAccess()->tune_options;
+int active_adapter_t::restart_tune(const chdb::any_mux_t& mux, subscription_id_t subscription_id) {
 	visit_variant(
 		mux,
-		[this, &tune_options](const dvbs_mux_t& mux) {
+		[this, subscription_id](const dvbs_mux_t& mux) {
 			bool user_requested = true;
-			devdb::resource_subscription_counts_t use_counts;
-			{
-				auto devdb_rtxn = receiver.devdb.rtxn();
-				auto rf_coupler_id = current_rf_coupler_id();
-				use_counts = devdb::fe::subscription_counts(devdb_rtxn, current_rf_path(), rf_coupler_id,
-																										nullptr /*fe_key_to_release*/);
-				devdb_rtxn.abort();
-			}
-			tune(current_rf_path(), current_lnb(), mux, tune_options, user_requested, use_counts);
+			retune(current_rf_path(), current_lnb(), mux, tune_options, user_requested, subscription_id);
 		},
-		[this, &tune_options](const dvbc_mux_t& mux) {
+		[this, subscription_id](const dvbc_mux_t& mux) {
 			bool user_requested = true;
-			tune(mux, tune_options, user_requested);
+			retune(mux, tune_options, user_requested, subscription_id);
 		},
-		[this, &tune_options](const dvbt_mux_t& mux) {
+		[this, subscription_id](const dvbt_mux_t& mux) {
 			bool user_requested = true;
-			tune(mux, tune_options, user_requested);
+			retune(mux, tune_options, user_requested, subscription_id);
 		});
 	return 0;
 }
@@ -240,86 +289,108 @@ int active_adapter_t::restart_tune(const chdb::any_mux_t& mux) {
 
 
 template<typename mux_t>
-int active_adapter_t::tune(const mux_t& mux, tune_options_t tune_options, bool user_requested) {
+int active_adapter_t::tune(const mux_t& mux_, subscription_options_t tune_options, bool user_requested,
+													 subscription_id_t subscription_id) {
+	mux_t mux;
+	if(user_requested) {
+		this->reset();
+		mux = prepare_si(mux_, false /*start*/, subscription_id);
+	} else
+		mux=mux_;
 	if(!fe)
 		return -1;
-	if(user_requested) {
-		tune_state = TUNE_INIT;
-	}
-#if 0
-	scan_mux_end_reported = false;
-#endif
-	auto ret = fe->tune(mux, tune_options, user_requested);
-	tune_start_time = system_clock_t::now();
+	fe->request_tune(mux, tune_options);
+#ifdef NEWTUNE
 	tune_state = ret<0 ? TUNE_FAILED: WAITING_FOR_LOCK;
+	dtdebugf("Subscribed: subscription_id={:d} ret={:d}", (int) subscription_id, ret);
+#else
+	tune_state = TUNE_REQUESTED;
+	dtdebugf("Subscribed: subscription_id={:d}", (int) subscription_id);
+#endif
 	return 0;
 }
 
 
-int active_adapter_t::remove_all_services(rec_manager_t& recmgr) {
-	// special type of loop because monitors map will be erased and iterators are invalidated
-	for (auto it = active_services.begin(); it != active_services.end();) {
-		auto& [pmt_pid, active_servicep] = (it++)->second; // it is incremented because it will be invalidated
-		recmgr.remove_live_buffer(*active_servicep);
-		remove_service(*active_servicep);
+int active_adapter_t::remove_all_services() {
+	std::vector<task_queue_t::future_t> futures;
+	for(auto& [subscription_id, aa] : subscribed_active_services) {
+		auto& service_thread = aa->service_thread;
+		if(!service_thread.must_exit())
+			futures.push_back(service_thread.stop_running(false/*wait*/));
 	}
-	assert(active_services.size() == 0);
+	wait_for_all(futures, true /*clear all errors*/);
+	subscribed_active_services.clear();
 	return 0;
 }
 
-int active_adapter_t::remove_service(active_service_t& channel) {
-	auto service_id = channel.get_current_service().k.service_id;
-	auto it = active_services.find(service_id);
-	if (it == active_services.end()) {
-		dterrorx("Request to deactivate non active channel: service_id=%d", service_id);
+int active_adapter_t::remove_service(subscription_id_t subscription_id) {
+	auto [it, found] = find_in_map(this->subscribed_active_services, subscription_id);
+	if (!found) {
+		//dterrorf("Request to deactivate non active service: subscription_id={:d}", (int)subscription_id);
 		return -1;
 	}
-
-	auto& [pmt_pid_, active_servicep] = it->second;
-	assert(active_servicep.get());
-	auto& active_service = *active_servicep;
-	dtdebugx("calling active_service.service_thread.deactivate");
-	active_service.service_thread.stop_running(true);
-
-	active_services.erase(it);
+	auto& active_service = *it->second;
+	auto service = active_service.get_current_service();
+	dtdebugf("Removing service for subscription {}: service={}", (int) subscription_id, service);
+	tuner_thread.remove_live_buffer(subscription_id);
+	auto& service_thread = active_service.service_thread;
+	service_thread.stop_running(true/*wait*/);
+	subscribed_active_services.erase(it);
 	return 0;
 }
 
-int active_adapter_t::add_service(active_service_t& active_service) {
+
+int active_adapter_t::add_service(subscription_id_t subscription_id, active_service_t& active_service) {
 	active_service.service_thread.start_running();
-	const auto ch = active_service.get_current_service();
-	dtdebug("TUNE ADD_CHANNEL STARTED " << ch.name);
+	const auto& service = active_service.get_current_service();
 	{
 		// pmt_pid is set to null_pid until we read it from PAT table
-		active_services[ch.k.service_id] = std::make_tuple(null_pid, active_service.shared_from_this());
+		subscribed_active_services[subscription_id] = active_service.shared_from_this();
 	}
 	return 0;
-
-	dtdebug("TUNE ADD_CHANNEL ENDED " << ch.name);
 }
 
 void active_adapter_t::on_stable_pat() {
-	usals_timer.end();
+	auto mux_ = current_tp();
+	auto* pmux = std::get_if<chdb::dvbs_mux_t>(&mux_);
+	if (!pmux)
+		return;
+	auto e = usals_timer.end();
+	if(!e)
+		return;
+	auto [end_time, usals_pos_start, usals_pos_end] = *e;
+ 	if(usals_pos_end == usals_pos_start)
+		return;
+	auto [ old_angle, new_angle, move_time_ms, speed ] =
+		fe->get_positioner_move_stats(usals_pos_start, usals_pos_end, end_time);
+	if (std::abs(new_angle - old_angle) <10)
+		return;
+	auto pol = pmux->pol;
+	dtdebugf("positioner moved from {:d} to {:d} in {:d}ms = {:f} degree/s pol={}",
+					 old_angle, new_angle, move_time_ms, speed, to_str(pol));
+	fmt::print("positioner moved from {:d} to {:d} in {:d}ms = {:f} degree/s pol={}\n",
+						 old_angle, new_angle, move_time_ms, speed, to_str(pol));
+
+
 }
 
-void active_adapter_t::on_first_pat() {
-	usals_timer.stamp();
+void active_adapter_t::on_first_pat(bool restart) {
+	usals_timer.stamp(restart);
 }
 
 
 //called periodically from tuner thread
 void active_adapter_t::monitor() {
 	assert(fe);
-	auto tune_mode = fe->ts.readAccess()->tune_options.tune_mode;
-	if(tune_mode != tune_mode_t::NORMAL && tune_mode != tune_mode_t::BLIND) {
-		dtdebugx("adapter %d NO MONITOR: tune_mode=%d", get_adapter_no(), (int) tune_mode);
+	auto tune_mode = fe->ts.readAccess()->tune_mode;
+	if(tune_mode != devdb::tune_mode_t::NORMAL && tune_mode != devdb::tune_mode_t::BLIND) {
+		//dtdebugf("adapter {:d} NO MONITOR: tune_mode={:d}", get_adapter_no(), (int) tune_mode);
 		return;
 	}
 	if(tune_state == TUNE_INIT) {
-		dtdebugx("adapter %d NO MONITOR: tune_mode=%d", get_adapter_no(), (int) tune_mode);
+		//dtdebugf("adapter {:d} NO MONITOR: tune_mode={:d}", get_adapter_no(), (int) tune_mode);
 		return;
 	}
-	//dtdebugx("adapter %d MONITOR: tune_mode=%d", get_adapter_no(), (int) tune_mode);
 
 	bool must_retune{false};
 	bool relocked_now{false};
@@ -327,7 +398,7 @@ void active_adapter_t::monitor() {
 	bool is_not_ts{false};
 	dttime_init();
 	if (si.abort_on_wrong_sat()) {
-		dtdebug("Attempting retune (wrong sat detected)");
+		dtdebugf("Attempting retune (wrong sat detected)");
 		must_retune = true;
 	} else {
 		std::tie(must_retune, relocked_now, tune_failed, is_not_ts) = check_status();
@@ -345,15 +416,12 @@ void active_adapter_t::monitor() {
 				start si processing
 			*/
 			auto t = fe->ts.readAccess()->tune_options.scan_target;
-			ss::string<128> prefix;
-			prefix << "TUN" << this->get_adapter_no();
-			log4cxx::NDC ndc(prefix.c_str());
 			init_si(t);
 			return;
 		} else {
 			if(!si.fix_tune_mux_template()) {
 				//lock was lost
-				si.reset_si(false/*close_streams*/);
+				si.reset_si(true /*close_streams*/);
 				return;
 			}
 		}
@@ -363,8 +431,8 @@ void active_adapter_t::monitor() {
 		check_isi_processing();
 	}
 	if (must_retune) {
-		dtdebug("Calling si.reset with force_finalize=true\n");
-		si.reset_si(false /*close_streams*/);
+		dtdebugf("Calling si.reset with force_finalize=true");
+		si.reset_si(true /*close_streams*/); //calls on_scan_mux_end
 		visit_variant(
 			current_tp(),
 			[this](dvbs_mux_t&& mux) { retune<dvbs_mux_t>();},
@@ -392,37 +460,46 @@ void active_adapter_t::monitor() {
 	}
 }
 
-
 int active_adapter_t::lnb_spectrum_scan(const devdb::rf_path_t& rf_path,
-																				const devdb::lnb_t& lnb, tune_options_t tune_options) {
+																				const devdb::lnb_t& lnb, subscription_options_t tune_options) {
 
 	set_current_tp({});
-	auto [ret, new_usals_sat_pos] = fe->lnb_spectrum_scan(rf_path, lnb, tune_options);
-	if(new_usals_sat_pos != sat_pos_none)
-		lnb_update_usals_pos(new_usals_sat_pos, sat_pos_none);
+	receiver.activate_spectrum_scan(tune_options.spectrum_scan_options, lnb.pol_type);
 
-	dtdebug("spectrum: diseqc done");
-	return ret;
+	fe->request_lnb_spectrum_scan(tuner_thread, rf_path, lnb, tune_options);
+	return 0;
 }
 
-active_adapter_t::active_adapter_t(receiver_t& receiver_, std::shared_ptr<dvb_frontend_t>& fe_)
+active_adapter_t::active_adapter_t(receiver_t& receiver_,
+																	 std::shared_ptr<dvb_frontend_t>& fe_)
 
 	: receiver(receiver_)
 	, fe(fe_)
-	, tuner_thread(receiver_.tuner_thread)
+	, tuner_thread(receiver_, *this)
 	,	si(receiver, std::make_unique<dvb_stream_reader_t>(*this, -1), false)
-{
+{}
+
+void active_adapter_t::destroy() {
+#ifndef NDEBUG
+	cb(tuner_thread); //test being called from correct thread
+	assert(!tuner_thread.has_exited());
+#endif
+	dtdebugf("~active_adapter_t: {:p}. Adapter {:d} frontend {:d} destroyed",
+					 fmt::ptr(this), get_adapter_no(), frontend_no());
+	this->deactivate();
+	dtdebugf("calling deactivate adapter {:d} done", this->get_adapter_no());
 }
 
 
 active_adapter_t::~active_adapter_t() {
-	dtdebugx("~active_adapter_t: %p. Adapter %d frontend %d destroyed", this, get_adapter_no(), frontend_no());
+	dtdebugf("~active_adapter_t: {:p}. Adapter {:d} frontend {:d} destroyed",
+					 fmt::ptr(this), get_adapter_no(), frontend_no());
 }
 
 int active_adapter_t::open_demux(int mode) const {
 	ss::string<PATH_MAX> demux_fname;
 	const int demux_no = 0; // are there any adapters on wwich demux_no!=0? If so how to associate them with frontends?
-	demux_fname.sprintf("%s%d/demux%d", DVB_DEV_PATH, get_adapter_no(), demux_no);
+	demux_fname.format("{:s}{:d}/demux{:d}", DVB_DEV_PATH, get_adapter_no(), demux_no);
 
 	int fd = ::open(demux_fname.c_str(), mode);
 	return fd;
@@ -528,10 +605,10 @@ void active_adapter_t::update_lof(devdb::lnb_t& lnb, int16_t sat_pos, chdb::fe_p
  */
 int active_adapter_t::deactivate() {
 	reset_si();
-	active_services.clear();
+	remove_all_services();
 	auto* fe = this->fe.get();
 	auto fefd = fe->ts.readAccess()->fefd;
-	dtdebugx("Release fe_fd=%d", fefd);
+	dtdebugf("Release fe_fd={:d}", fefd);
 	fe->release_fe();
 	tune_state = TUNE_INIT;
 	return 0;
@@ -542,36 +619,18 @@ devdb::usals_location_t active_adapter_t::get_usals_location() {
 	return r->usals_location;
 }
 
-/*
-	set a new usals_pos, for tuning to sat at sat_pos (which may be left unspecified as sat_pos_none)
- */
-void active_adapter_t::lnb_update_usals_pos(int16_t usals_pos, int16_t sat_pos) {
-	auto loc = this->get_usals_location();
-	auto devdb_wtxn = receiver.devdb.wtxn();
-	auto lnb = this->fe->ts.readAccess()->reserved_lnb;
-	int ret = devdb::dish::update_usals_pos(devdb_wtxn, lnb, usals_pos, loc, sat_pos);
-	if( ret<0 )
-		devdb_wtxn.abort();
-	else
-		devdb_wtxn.commit();
-
-	auto w = this->fe->ts.writeAccess();
-	w->reserved_lnb = lnb;
-	if (usals_pos != lnb.usals_pos) {
-		// measure how long it takes to move positioner
-		usals_timer.start(lnb.usals_pos, usals_pos);
-		w->reserved_lnb.usals_pos = usals_pos;
-		assert(w->dbfe.rf_inputs.size()>0);
-	}
-}
 
 /*
 	Called when user edits lnb parameters.
-	Todo: What if the parameters cause a change in dish, usals_pos...?
+	Todo: What if the parameters cause a change in dish?
+	returns true if usals_pos has changed
  */
-void active_adapter_t::update_current_lnb(const devdb::lnb_t& lnb) {
-	fe->ts.writeAccess()->reserved_lnb = lnb;
-	assert(fe->ts.readAccess()->dbfe.rf_inputs.size()>0);
+bool active_adapter_t::update_current_lnb(const devdb::lnb_t& lnb) {
+	auto w = fe->ts.writeAccess();
+	bool usals_pos_changed = (lnb.on_positioner && lnb.usals_pos != w->reserved_lnb.usals_pos);
+	w->reserved_lnb = lnb;
+	assert(w->dbfe.rf_inputs.size()>0);
+	return usals_pos_changed;
 };
 
 //only called from active_si_stream.h
@@ -620,7 +679,7 @@ bool active_adapter_t::add_embedded_si_stream(const chdb::any_mux_t& embedded_mu
 	auto* mux_key = chdb::mux_key_ptr(embedded_mux);
 	auto [it, found] = find_in_map(embedded_si_streams, mux_key->t2mi_pid);
 	if (found) {
-		dtdebugx("Ignoring request to add the same si stream twice");
+		dtdebugf("Ignoring request to add the same si stream twice");
 		return false;
 	}
 	auto reader = make_embedded_stream_reader(embedded_mux);
@@ -647,7 +706,7 @@ bool active_adapter_t::read_and_process_data_for_fd(const epoll_event* evt) {
 	return false;
 }
 
-void active_adapter_t::init_si(scan_target_t scan_target) {
+void active_adapter_t::init_si(devdb::scan_target_t scan_target) {
 	/*@When we are called on a t2mi mux, there could be confusion between the t2mi mux (with t2mi_pid set)
 		and the one without. To avoid this, we find the non-t2mi_pid version first
 	*/
@@ -694,16 +753,18 @@ void active_adapter_t::init_si(scan_target_t scan_target) {
 
 
 chdb::any_mux_t active_adapter_t::prepare_si(chdb::any_mux_t mux, bool start,
-																						 subscription_id_t subscription_id, uint32_t scan_id,
+																						 subscription_id_t subscription_id,
 																						 bool add_to_running_mux) {
 	namespace m = chdb::update_mux_preserve_t;
-	dtdebug("prepare_si: mux=" << mux);
+	dtdebugf("prepare_si: mux={}", mux);
 	/*
 		add an embedded si stream and set the current_mux to to the encapsulating mux
 	 */
+	auto& scan_id = mux_common_ptr(mux)->scan_id;
+	bool our_scan = scanner_t::is_our_scan(scan_id);
 	auto* dvbs_mux = std::get_if<chdb::dvbs_mux_t>(&mux);
 	if (dvbs_mux && dvbs_mux->k.t2mi_pid >= 0) {
-		dtdebug("mux " << *dvbs_mux << " is an embedded stream");
+		dtdebugf("mux {} is an embedded stream", *dvbs_mux);
 		auto master_mux = *dvbs_mux;
 		if(add_embedded_si_stream(mux, start)) {
 			auto mux_key = master_mux.k;
@@ -711,19 +772,18 @@ chdb::any_mux_t active_adapter_t::prepare_si(chdb::any_mux_t mux, bool start,
 			if(!add_to_running_mux)
 				set_current_tp(master_mux);
 		}
-		if(scan_id > 0) {
+		if(our_scan) {
 			assert((int) subscription_id >=0 );
 			auto& si = embedded_si_streams.at(dvbs_mux->k.t2mi_pid);
 			si.activate_scan(mux, subscription_id, scan_id);
 		}
 		return master_mux;
 	} else {
-		if(!add_to_running_mux)
-			set_current_tp(mux);
-		if(scan_id > 0) {
-			assert((int) subscription_id >=0 );
+		if(our_scan) {
 			si.activate_scan(mux, subscription_id, scan_id);
 		}
+		if(!add_to_running_mux)
+			set_current_tp(mux);
 		return mux;
 	}
 }
@@ -732,10 +792,6 @@ chdb::any_mux_t active_adapter_t::prepare_si(chdb::any_mux_t mux, bool start,
 	Finalize all si processing, and notify scanners
  */
 void active_adapter_t::end_si() {
-#if 0 //in case tuning fails, adapter may not be open
-	if(!is_open())
-		return;
-#endif
 	for (auto& [pid, si_] : embedded_si_streams) {
 		si_.end();
 	}
@@ -748,18 +804,18 @@ void active_adapter_t::end_si() {
  */
 void active_adapter_t::reset_si() {
 	if(!is_open()) {
-		dtdebug("skipping; not open");
+		dtdebugf("skipping; not open");
 		return;
 	}
 	if (tune_state != tune_state_t::TUNE_INIT) {
-		dtdebugx("resetting si_processing_done=%d\n", si.si_processing_done);
+		dtdebugf("resetting si_processing_done={:d}\n", si.si_processing_done);
 		for (auto& [pid, si_] : embedded_si_streams) {
 			si_.reset_si(true /*close stream*/);
 		}
 		si.reset_si(true /*close streams*/);
-		dtdebugx("resetting now: si_processing_done=%d\n", si.si_processing_done);
+		dtdebugf("resetting now: si_processing_done={:d}\n", si.si_processing_done);
 	} else {
-		dtdebugx("skipping tune_state=%d", (int) tune_state);
+		dtdebugf("skipping tune_state={:d}", (int) tune_state);
 	}
 	embedded_si_streams.clear();
 	stream_filters.writeAccess()->clear();
@@ -794,7 +850,7 @@ void active_adapter_t::update_tuned_mux_tune_confirmation(const tune_confirmatio
 		w->tune_confirmation = tune_confirmation;
 	}
 	if(need_lof_offset_update) {
-		dtdebugx("adapter %d Updating LNB LOF offset", get_adapter_no());
+		dtdebugf("adapter {:d} Updating LNB LOF offset", get_adapter_no());
 		update_lof(lnb, sat_pos, pol, nit_frequency, uncorrected_driver_freq);
 		fe->ts.writeAccess()->reserved_lnb = lnb;
 	}
@@ -858,11 +914,18 @@ void active_adapter_t::check_for_new_streams()
 	};
 	auto* mux_key = mux_key_ptr(signal_info.driver_mux);
 	auto* c = mux_common_ptr(signal_info.driver_mux);
-	auto scan_id = c->scan_id;
+	auto& scan_id = c->scan_id;
+	assert(!scanner_t::is_scanning(scan_id) || scanner_t::is_our_scan(scan_id));
 	int tuned_stream_id = mux_key_ptr(signal_info.driver_mux)->stream_id;
 
 	auto tuned_mux = current_tp();
 	bool is_scanning = mux_common_ptr(tuned_mux)->scan_status == scan_status_t::ACTIVE;
+	if(is_scanning != scanner_t::is_scanning(scan_id)) {
+		auto tst = scanner_t::is_scanning(scan_id);
+		dtdebugf("Unexpected: tuned_mux={} driver_mux={} is_scanning={}/{} scan_id/pid={}",
+						 tuned_mux, signal_info.driver_mux, is_scanning, tst, scan_id.pid);
+		is_scanning = false;
+	}
 #ifndef NDEBUG
 	int last_mux_id = mux_key->mux_id;
 #endif
@@ -873,7 +936,7 @@ void active_adapter_t::check_for_new_streams()
 	//c->scan_duration: set per stream below
 	//c->epg_scan // from database
 	c->scan_status = scan_status_t::IDLE;
-	c->scan_id = 0;
+	c->scan_id = {};
 	//c->num_services // from database
 	c->network_id = 0; //unknown
 	c->ts_id = 0; //unknown
@@ -913,7 +976,8 @@ void active_adapter_t::check_for_new_streams()
 
 		namespace m = chdb::update_mux_preserve_t;
 
-		auto update_scan_status = [&](const chdb::mux_common_t* pdbc, const chdb::mux_key_t* pdbk) {
+		auto update_scan_status = [&](chdb::mux_common_t* pmergedc, chdb::mux_key_t* pmergedk,
+																	const chdb::mux_common_t* pdbc, const chdb::mux_key_t* pdbk) {
 			bool is_active = pdbc && pdbc->scan_status == scan_status_t::ACTIVE;
 			if( is_active) {
 				return false;
@@ -921,13 +985,13 @@ void active_adapter_t::check_for_new_streams()
 			if(is_dvb) {
 				if(!pdbc) { //there is no mux for this stream yet; create one
 					c->scan_status = is_scanning ? scan_status_t::PENDING : scan_status_t::IDLE;
-					c->scan_id = is_scanning ? scan_id : 0;
+					c->scan_id = is_scanning ? scan_id : chdb::scan_id_t{};
 				} else {
 					if(!propagate_scan || pdbc->mtime >= scan_start_time || pdbc->scan_status == scan_status_t::ACTIVE)
 						return false; //leave scanning to future subscription, or scanning was already done
 					*c = *pdbc;
 					c->scan_status = scan_status_t::PENDING;
-					c->scan_id = is_scanning ? scan_id : 0;
+					c->scan_id = is_scanning ? scan_id : chdb::scan_id_t{};
 				}
 			} else { //not dvb
 				*c = ctemplate;
@@ -952,7 +1016,7 @@ void active_adapter_t::check_for_new_streams()
 	}
 	if(txn) {
 		txn->commit();
-		dtdebug("committed");
+		dtdebugf("committed");
 	}
 }
 
@@ -966,7 +1030,7 @@ void active_adapter_t::check_for_unlockable_streams()
 	auto chdb_wtxn = receiver.chdb.wtxn();
 	chdb::clear_all_streams_pending_status(chdb_wtxn, now, mux);
 	chdb_wtxn.commit();
-	dtdebug("committed");
+	dtdebugf("unlockable stream: tune_state={}", (int)tune_state);
 }
 
 void active_adapter_t::check_for_non_existing_streams()
@@ -979,14 +1043,173 @@ void active_adapter_t::check_for_non_existing_streams()
 	auto chdb_wtxn = receiver.chdb.wtxn();
 	chdb::clear_all_streams_pending_status(chdb_wtxn, now, mux);
 	chdb_wtxn.commit();
-	dtdebug("committed");
+	dtdebugf("committed");
+}
+
+
+
+std::shared_ptr<active_service_t>
+active_adapter_t::tune_service_in_use(const subscribe_ret_t& sret,
+																			const chdb::service_t& service) {
+	auto [it, found] = find_in_map(this->subscribed_active_services, sret.subscription_id);
+	if(!found)
+		return nullptr;
+	auto& active_servicep = it->second;
+	/* The service is already subscribed
+		 Unsubscribe_ our old mux and service (if any) by overwriting it with the found active_service
+	*/
+	subscribed_active_services[sret.subscription_id] = active_servicep;
+	dtdebugf("[{}] sub={}: reusing existing service", service, (int) sret.subscription_id);
+	return active_servicep;
+}
+
+std::shared_ptr<active_service_t>
+active_adapter_t::tune_service(const subscribe_ret_t& sret,
+															 const chdb::any_mux_t& mux,
+															 const chdb::service_t& service) {
+	assert(sret.subscription_id != subscription_id_t::NONE);
+
+	dtdebugf("Subscribe {} sub={}: tune start", service,(int) sret.subscription_id);
+
+	/*
+		If another subscription is tuned to the wanted service, we do not have to tune.
+		We only place a reservation so that the service will remain tuned
+	*/
+
+	auto active_service_ptr = tune_service_in_use(sret, service);
+	if (active_service_ptr.get())
+		return active_service_ptr;
+
+	// now create a new active_service, subscribe the related service and send instructions to start it
+
+	auto prefix =fmt::format("CH[{:d}:{}]", this->get_adapter_no(), service);
+	log4cxx::NDC::push(prefix.c_str());
+
+	auto reader = service.k.mux.t2mi_pid >= 0 ? this->make_embedded_stream_reader(mux)
+		: this->make_dvb_stream_reader();
+	active_service_ptr = std::make_shared<active_service_t>(receiver, *this, service, std::move(reader));
+	log4cxx::NDC::pop();
+	// remember that this service is now in use (for future planning and for later unsubscription)
+
+	add_service(sret.subscription_id, *active_service_ptr);
+	return active_service_ptr;
+}
+
+std::unique_ptr<playback_mpm_t>
+active_adapter_t::tune_service_for_viewing(const subscribe_ret_t& sret,
+															 const chdb::any_mux_t& mux,
+															 const chdb::service_t& service) {
+	auto active_servicep = tune_service(sret, mux, service);
+	if(active_servicep) {
+		auto live_service = active_servicep->get_live_service(sret.subscription_id);
+		tuner_thread.add_live_buffer(live_service);
+		return active_servicep->make_client_mpm(sret.subscription_id);
+	}
+	else
+		return nullptr;
+}
+
+std::optional<recdb::rec_t>
+active_adapter_t::tune_service_for_recording(const subscribe_ret_t& sret,
+															 const chdb::any_mux_t& mux,
+															 const recdb::rec_t& rec) {
+	auto active_servicep = tune_service(sret, mux, rec.service);
+	if(!active_servicep)
+		return {};
+	active_servicep->start_recording(sret.subscription_id, rec);
+	auto live_service = active_servicep->get_live_service(sret.subscription_id);
+	tuner_thread.add_live_buffer(live_service);
+	return active_servicep->start_recording(sret.subscription_id, rec);
+}
+
+devdb::stream_t active_adapter_t::add_stream
+(const subscribe_ret_t& sret, const devdb::stream_t& stream, const chdb::any_mux_t& mux) {
+	auto fd = active_adapter_t::open_demux(O_RDONLY);
+
+	uint16_t pid= 0x2000; //full transport stream
+	dtdebugf("Adding pid={}", pid);
+	int dmx_buffer_size = 32 * 1024 * 1024;
+	struct dmx_pes_filter_params pesFilterParams;
+	memset(&pesFilterParams,0,sizeof(pesFilterParams));
+	pesFilterParams.pid = pid;
+	pesFilterParams.input = DMX_IN_FRONTEND;
+	pesFilterParams.output = DMX_OUT_TSDEMUX_TAP;//DMX_OUT_TS_TAP;
+	pesFilterParams.pes_type = DMX_PES_OTHER;
+	pesFilterParams.flags = 0; //DMX_IMMEDIATE_START;
+	if(ioctl(fd, DMX_SET_BUFFER_SIZE, dmx_buffer_size)) {
+		dterrorf("DMX_SET_BUFFER_SIZE failed: {}", strerror(errno));
+	}
+	if (ioctl(fd, DMX_SET_PES_FILTER, &pesFilterParams) < 0) {
+		dterrorf("DMX_SET_PES_FILTER  pid={} failed: {}", pid, strerror(errno));
+		return {};
+	}
+	if(ioctl (fd, DMX_START)<0) {
+		dterrorf("DMX_START FAILED: {}", strerror(errno));
+	}
+
+	auto s = std::make_shared<streamer_t>(fd, stream);
+	s->start();
+	streamers[sret.subscription_id] = s;
+	return s->stream;
+}
+
+void active_adapter_t::remove_stream(subscription_id_t subscription_id) {
+	//auto streamer = streamer_t();
+	auto [it, found] = find_in_map(streamers, subscription_id);
+	assert(found);
+	auto& streamer = *it->second;
+	streamer.stop();
+	streamers.erase(it);
+}
+
+/*
+	Called when out own subscription is already tuned to mux, but retune is requested, e.g.,
+	from positioner_dialog. This is almost the same as a fresh tune, except that connection
+	to the driver is kept active_adapter remains active
+ */
+int active_adapter_t::request_retune(const chdb::any_mux_t& mux_,
+																		 const subscription_options_t& tune_options,
+																		 subscription_id_t subscription_id) {
+
+	{
+		int frequency;
+		int symbol_rate;
+		auto &m = mux_;
+		std::visit([&frequency, &symbol_rate](auto& mux)  {
+			frequency= get_member(mux, frequency, -1);
+			symbol_rate= get_member(mux, symbol_rate, -1);
+		}, m);
+	}
+	this->reset_si(); //clear left overs from last tune
+	this->fe->set_tune_options(tune_options);
+	auto mux = this->prepare_si(mux_, false /*start*/, subscription_id);
+	this->processed_isis.reset();
+	this->restart_tune(mux, subscription_id);
+	return 0;
+}
+
+
+std::shared_ptr<active_service_t>
+active_adapter_t::active_service_for_subscription(subscription_id_t subscription_id) {
+	auto [it, found] = find_in_map(this->subscribed_active_services, subscription_id);
+	return found ? it->second : std::shared_ptr<active_service_t>{};
+}
+
+
+std::optional<std::tuple<steady_time_t, int16_t, int16_t>> usals_timer_t::end() {
+	if(!started) {
+		return {};
+	}
+	started = false;
+	auto end = stamped ? first_pat_time : steady_clock_t::now();
+	return std::tuple<steady_time_t, int16_t, int16_t>{end, usals_pos_start, usals_pos_end};
 }
 
 //instantiations
 template
-int active_adapter_t::tune<chdb::dvbc_mux_t>(const chdb::dvbc_mux_t& mux, tune_options_t
-																							tune_options, bool user_requested);
+int active_adapter_t::tune<chdb::dvbc_mux_t>(const chdb::dvbc_mux_t& mux, subscription_options_t tune_options,
+																						 bool user_requested, subscription_id_t subscription_id);
 
 template
-int active_adapter_t::tune<chdb::dvbt_mux_t>(const chdb::dvbt_mux_t& mux, tune_options_t
-																							tune_options, bool user_requested);
+int active_adapter_t::tune<chdb::dvbt_mux_t>(const chdb::dvbt_mux_t& mux, subscription_options_t tune_options,
+																						 bool user_requested, subscription_id_t subscription_id);

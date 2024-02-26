@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -124,8 +124,8 @@ int options_t::parse_options(int argc, char** argv) {
 			// user specified -b, without a value
 			ss::string<128> tmp;
 			tmp = in_db.c_str();
-			tmp.sprintf(".");
-			tmp.sprintf(ss::dateTime(time(NULL), "%Y%m%d_%H:%M:%S"));
+			tmp.format(".");
+			tmp.format(":%Y%m%d_%H:%M:%S", time(NULL));
 			backup_db = tmp.c_str();
 		} else {
 			backup_db = fs::canonical(fs::path(backup_db)); // clean trailing slashes and such

@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -69,6 +69,7 @@ PYBIND11_MODULE(pyneumompv, m) {
 		.def("mpv_command", &MpvPlayer::mpv_command, py::arg("command"), py::arg("arg1") = nullptr,
 				 py::arg("arg2") = nullptr)
 		.def("stop_play", &MpvPlayer::stop_play)
+		.def("stop_play_and_exit", &MpvPlayer::stop_play_and_exit)
 		.def("close", &MpvPlayer::close)
 		.def("pause", &MpvPlayer::pause)
 		//.def("subtitles", &MpvPlayer::subtitles)
@@ -78,5 +79,6 @@ PYBIND11_MODULE(pyneumompv, m) {
 		.def("change_audio_volume", &MpvPlayer::change_audio_volume)
 		.def("set_subtitle_language", &MpvPlayer::set_subtitle_language)
 		.def("get_current_audio_language", &MpvPlayer::get_current_audio_language)
+		.def("get_current_subtitle_language", &MpvPlayer::get_current_subtitle_language)
 		;
 };

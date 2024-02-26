@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -23,7 +23,7 @@
 #include "neumodb/chdb/chdb_extra.h"
 #include "neumodb/devdb/devdb_extra.h"
 #include "devmanager.h"
-#include "tune_options.h"
+#include "neumodb/devdb/tune_options.h"
 
 #include <set>
 
@@ -32,7 +32,6 @@ class tuner_thread_t;
 class receiver_t;
 class active_adapter_t;
 struct sdt_data_t;
-
 
 struct scan_state_t {
 	/*
@@ -110,7 +109,7 @@ struct scan_state_t {
 
 	ss::vector<completion_state_t, completion_index_t::NUM> completion_states;
 
-	ss::vector<std::tuple<uint32_t, subscription_id_t>,2> scans_in_progress; //indexed by scan_id
+	ss::vector<std::tuple<chdb::scan_id_t, subscription_id_t>,2> scans_in_progress; //indexed by scan_id
 
 	scan_state_t() {
 		completion_states.resize(completion_index_t::NUM);
@@ -174,17 +173,46 @@ struct scan_state_t {
 		commpleted means that each parser made it to the end without any unfinished
 		business
 	 */
-	inline bool scan_completed() const {
-		for(auto& c: completion_states)
+	inline bool nit_sdt_scan_completed() const {
+		for(int idx = completion_index_t::PAT; idx <= completion_index_t::SDT_NETWORK; ++idx) {
+			auto& c =  completion_states[idx];
 			if(!c.completed && !c.notpresent() && c.required_for_scan)
 				return false;
+		}
 		return true;
 	}
 
-	inline int scan_duration() const {
+	/*
+		commpleted means that each parser made it to the end without any unfinished
+		business
+	 */
+	inline bool epg_scan_completed() const {
+		for(int idx = completion_index_t::EIT_ACTUAL_EPG; idx < completion_index_t::NUM; ++idx) {
+			auto& c =  completion_states[idx];
+			if(!c.completed && !c.notpresent() && c.required_for_scan)
+				return false;
+		}
+		return true;
+	}
+
+	inline int nit_sdt_scan_duration() const {
 		auto start = steady_time_t::max();
 		auto end = steady_time_t::min();
-		for(auto& c: completion_states) {
+		for(int idx = completion_index_t::PAT; idx <= completion_index_t::SDT_NETWORK; ++idx) {
+			auto& c =  completion_states[idx];
+			if(c.active) {
+				start = std::min(start, c.start_time);
+				end = std::max(end, c.last_active);
+			}
+		}
+		return std::chrono::duration_cast<std::chrono::seconds>(end - start).count();
+	}
+
+	inline int epg_scan_duration() const {
+		auto start = steady_time_t::max();
+		auto end = steady_time_t::min();
+		for(int idx = completion_index_t::EIT_ACTUAL_EPG; idx < completion_index_t::NUM; ++idx) {
+			auto& c =  completion_states[idx];
 			if(c.active) {
 				start = std::min(start, c.start_time);
 				end = std::max(end, c.last_active);
@@ -206,69 +234,108 @@ struct scan_state_t {
 };
 
 
-
-
+/*
+	internal state of blindscan is organised per satellite band (all data that can be tuned without changing diseqc
+	settings, or switching to another tuner)
+ */
 struct blindscan_key_t {
 	int16_t sat_pos{sat_pos_none};
-	int8_t band{0};
+	std::tuple<chdb::sat_band_t, chdb::sat_sub_band_t> band{chdb::sat_band_t::UNKNOWN, chdb::sat_sub_band_t::NONE};
 	chdb::fe_polarisation_t pol;
 
 	bool operator<(const blindscan_key_t& other) const;
 
 	blindscan_key_t(int16_t sat_pos, chdb::fe_polarisation_t pol, uint32_t frequency);
+	blindscan_key_t(int16_t sat_pos, const chdb::band_scan_t& band_scan);
 
 	blindscan_key_t() = default;
 };
 
-//todo: extend to dvbc and dvbt
-struct blindscan_t {
-	statdb::spectrum_key_t spectrum_key;
-	ss::vector_<chdb::spectral_peak_t> peaks;
-	bool operator<(const blindscan_key_t& other) const;
+struct peak_to_scan_t {
+	chdb::spectral_peak_t peak;
+	chdb::scan_id_t scan_id;
+	peak_to_scan_t() = default;
+	peak_to_scan_t(const chdb::spectral_peak_t& peak, chdb::scan_id_t scan_id)
+		: peak(peak)
+		, scan_id(scan_id)
+		{}
 
-	bool valid() const {
-		return  this->spectrum_key.sat_pos != sat_pos_none;
+	inline bool is_present() const {
+		return scan_id.subscription_id >=0;
 	}
 };
 
+//todo: extend to dvbc and dvbt
+struct blindscan_t {
+	/*
+		spectrum_key is set only after spectral peaks have been found. In that case it is still possible
+		that peaks.size() ==0 (empty spectrum)
+
+		Scanning peaks is performed in two steps (first try to use mux parameters from database; then try blind),
+		but this scanning is always done using the rf_path (spectrum_key.rf_path) used to scan the mux
+
+		Therefore, peaks will always be scanned on the lnb/tuner on which they were located
+
+	*/
+	std::optional<statdb::spectrum_key_t> spectrum_key; //set after peaks to scan have been added to provide correct sat_pos
+	ss::vector_<peak_to_scan_t> peaks;
+	bool operator<(const blindscan_key_t& other) const;
+
+	bool spectrum_acquired() const {
+		return  !!this->spectrum_key; //blindscan is valid if spectrum was acquired
+	}
+};
 
 struct scan_subscription_t {
+	subscription_id_t subscription_id{subscription_id_t::NONE}; //positive if tuning in progress
 	bool scan_start_reported{false};
 	blindscan_key_t blindscan_key;
-	chdb::spectral_peak_t peak;
+	peak_to_scan_t peak;
 	std::optional<chdb::any_mux_t> mux;
-	devdb::fe_key_t fe_key;
+	std::optional<std::tuple<chdb::sat_t, chdb::band_scan_t>> sat_band;
 	bool is_peak_scan{false}; //true if we scan the peak rather than a corresponding mux in the db
+	scan_subscription_t(subscription_id_t subscription_id)
+		: subscription_id(subscription_id) {}
+	scan_subscription_t(const scan_subscription_t& other) = default;
+	scan_subscription_t(scan_subscription_t&& other) = default;
+	scan_subscription_t& operator=(const scan_subscription_t& other) = default;
 };
 
 
-struct scan_stats_t
-{
-	int pending_peaks{0};
-	int pending_muxes{0};
-	int active_muxes{0};
-	int finished_muxes{0}; //total number of muxes we tried to scan
-	int failed_muxes{0}; //muxes which could not be locked
-	int locked_muxes{0}; //mixes which locked
-	int si_muxes{0}; //muxes with si data
-	scan_stats_t() = default;
-};
+inline bool scan_stats_done(const devdb::scan_stats_t& ss) {
+		return ss.pending_peaks + ss.pending_muxes  + ss.pending_bands + ss.active_muxes + ss.active_bands == 0;
+}
+inline void scan_stats_abort(devdb::scan_stats_t& ss) {
+		ss.pending_peaks = 0;
+		ss.pending_muxes = 0;
+		ss.pending_bands = 0;
+		ss.active_muxes = 0;
+		ss.active_bands = 0;
+}
 
-struct scan_report_t {
+struct scan_mux_end_report_t {
 	statdb::spectrum_key_t spectrum_key;
-	int band;
-	chdb::spectral_peak_t peak;
+	peak_to_scan_t peak;
 	std::optional<chdb::any_mux_t> mux;
 	devdb::fe_key_t fe_key;
-	scan_stats_t scan_stats;
-	scan_report_t() = default;
-	scan_report_t(const scan_subscription_t& subscription, const statdb::spectrum_key_t spectrum_key,
-								const scan_stats_t & scan_stats);
+	scan_mux_end_report_t() = default;
+	scan_mux_end_report_t(const scan_subscription_t& subscription, const statdb::spectrum_key_t spectrum_key);
 };
 
+#ifdef TODO //not needed?
+struct scan_band_end_report_t {
+	statdb::spectrum_key_t spectrum_key;
+	chdb::sat_t sat;
+	chdb::band_scan_t band_scan;
+	devdb::fe_key_t fe_key;
+	scan_band_end_report_t() = default;
+	scan_band_end_report_t(const scan_subscription_t& subscription, const statdb::spectrum_key_t spectrum_key);
+};
+#endif
 
 class scanner_t;
 class subscriber_t;
+using ssptr_t = std::shared_ptr<subscriber_t>;
 
 class scan_t {
 	friend class scanner_t;
@@ -277,63 +344,129 @@ class scan_t {
 	receiver_thread_t& receiver_thread;
 	receiver_t& receiver;
 	subscription_id_t scan_subscription_id;
-	uint32_t scan_id;
+
 	subscription_id_t monitored_subscription_id{-1};
-	tune_options_t tune_options{scan_target_t::SCAN_MINIMAL};
-	chdb::any_mux_t last_subscribed_mux;
+	steady_time_t monitor_time{}; //time when we displayed new info for monitor_su
+	signal_info_t monitor_signal_info{}; //last displayed montiored signal_info
+
+	std::vector<subscription_options_t> tune_options_; //indexexed by opt_id
 	int max_num_subscriptions_for_retry{std::numeric_limits<int>::max()}; //maximum number of subscriptions that have been in use
 
 	//TODO important: no fe_key_t should occur more than once in subscriptions
 	std::map<subscription_id_t, scan_subscription_t> subscriptions;
 	std::map<blindscan_key_t, blindscan_t> blindscans;
+	int next_opt_id{0};
+	devdb::scan_stats_t scan_stats_dvbs;
+	devdb::scan_stats_t scan_stats_dvbc;
+	devdb::scan_stats_t scan_stats_dvbt;
+	inline devdb::scan_stats_t get_scan_stats() const;
 
-public:
-	using stats_t = safe::Safe<scan_stats_t>;
-	stats_t scan_stats;
+	template<typename mux_t>
+	requires (! is_same_type_v<chdb::sat_t, mux_t>)
+	inline devdb::scan_stats_t& get_scan_stats_ref(const mux_t& mux);
+	inline devdb::scan_stats_t& get_scan_stats_ref(int16_t sat_pos);
+	inline devdb::scan_stats_t& get_scan_stats_ref(const chdb::sat_t& sat);
 
 private:
+	void update_monitor(const ss::vector_<subscription_id_t>& fe_subscription_ids,
+											const signal_info_t& signal_info);
+
+	inline chdb::scan_id_t make_scan_id(subscription_id_t scan_subscription_id,
+																			const subscription_options_t& tune_options) {
+		chdb::scan_id_t ret;
+		assert(tune_options.subscription_type != devdb::subscription_type_t::TUNE);
+		ret.subscription_id = (int32_t) scan_subscription_id;
+		ret.pid = getpid();
+		ret.opt_id = next_opt_id++;
+		assert(ret.opt_id == (int)tune_options_.size());
+		tune_options_.push_back(tune_options);
+		return ret;
+	}
+
+	inline subscription_options_t& tune_options_for_scan_id(chdb::scan_id_t scan_id) {
+		assert(scan_id.opt_id >= 0 && scan_id.opt_id < (int)tune_options_.size());
+		return tune_options_[scan_id.opt_id];
+	}
+#if 0
+	void update_db_sat(const chdb::sat_t& sat, const chdb::band_scan_t& band_scan);
+#endif
 	bool mux_is_being_scanned(const chdb::any_mux_t& mux);
-	std::tuple<int, int> scan_loop(const devdb::fe_t& finished_fe, const chdb::any_mux_t& finished_mux,
-																 subscription_id_t finished_subscription_id);
+	bool band_is_being_scanned(const chdb::band_scan_t& band_scan);
 
-	std::tuple<subscription_id_t, subscription_id_t>
-	scan_try_mux(subscription_id_t reusable_subscription_id ,
-							 scan_subscription_t& subscription,
-							 const devdb::rf_path_t* required_rf_path,
-							 bool use_blind_tune);
 
-	bool rescan_peak(blindscan_t& blindscan, subscription_id_t reusable_subscription_id,
-									 scan_subscription_t& subscription);
+	void scan_loop(db_txn& chdb_rtxn, scan_subscription_t& subscription,
+								 const devdb::fe_t& finished_fe, const chdb::any_mux_t& finished_mux);
 
-	subscription_id_t scan_peak(db_txn& chdb_rtxn, blindscan_t& blindscan,
-															subscription_id_t subscription_id, scan_subscription_t& subscription);
+	void scan_loop(db_txn& chdb_rtxn, scan_subscription_t& subscription,
+								 const devdb::fe_t& finished_fe, const chdb::sat_t& finished_sat);
+
+
+
+	void on_scan_mux_end(const devdb::fe_t& finished_fe, const chdb::any_mux_t& finished_mux,
+											 const ssptr_t finished_ssptr);
+
+	void on_spectrum_scan_band_end(const devdb::fe_t& finished_fe, const spectrum_scan_t& spectrum_scan,
+																 const ssptr_t finished_ssptr);
+
+	template <typename mux_t>
+	std::tuple<ssptr_t, scan_subscription_t*, bool>
+	scan_try_mux(ssptr_t reusable_ssptr,
+							 const mux_t& mux, bool use_blind_tune, const blindscan_key_t& blindscan_key);
+
+	inline std::tuple<ssptr_t, scan_subscription_t*, bool>
+	scan_try_mux(ssptr_t reusable_ssptr,
+							 const chdb::any_mux_t& mux, bool use_blind_tune) {
+		return std::visit([&](auto&mux) {
+			return scan_try_mux(reusable_ssptr, mux, use_blind_tune);
+		}, mux);
+	}
+
+	std::tuple<ssptr_t, scan_subscription_t*, bool>
+	scan_try_band(ssptr_t reuseable_ssptr,
+								const chdb::sat_t& sat, const chdb::band_scan_t& band_scan,
+								const blindscan_key_t& blindscan_key, devdb::scan_stats_t& scan_stats);
+
 	template<typename mux_t>
-	std::tuple<int, int, int, int, subscription_id_t>
-	scan_next(db_txn& chdb_rtxn, subscription_id_t finished_subscription_id,
-						scan_subscription_t& subscription);
+	bool rescan_peak(const blindscan_t& blindscan, ssptr_t reusable_ssptr,
+									 mux_t& mux, const peak_to_scan_t& peak, const blindscan_key_t& blindscan_key);
 
-	bool finish_subscription(db_txn& rtxn,  subscription_id_t finished_subscription_id,
-																					 scan_subscription_t& subscription,
-																					 const chdb::any_mux_t& finished_mux);
-	void add_completed(const devdb::fe_t& fe, const chdb::any_mux_t& mux, int num_pending_muxes, int num_pending_peaks);
+	template<typename mux_t>
+	std::tuple<bool, bool>
+	scan_try_peak(db_txn& chdb_rtxn, blindscan_t& blindscan,
+						ssptr_t reusable_ssptr, const peak_to_scan_t& peak,
+						const blindscan_key_t& blindscan_key);
+
+	ssptr_t
+	scan_next_peaks(db_txn& chdb_rtxn,
+									ssptr_t reuseable_ssptr,
+									std::map<blindscan_key_t, bool>& skip_map, devdb::scan_stats_t& scan_stats);
+
+	template<typename mux_t>
+	ssptr_t
+	scan_next_muxes(db_txn& chdb_rtxn,
+									ssptr_t reuseable_ssptr,
+									std::map<blindscan_key_t, bool>& skip_map, devdb::scan_stats_t& scan_stats);
+
+	ssptr_t
+	scan_next_bands(db_txn& chdb_rtxn,
+									ssptr_t reuseable_ssptr,
+									std::map<blindscan_key_t, bool>& skip_map, devdb::scan_stats_t& scan_stats);
+
+	template<typename mux_t>
+	ssptr_t
+	scan_next(db_txn& chdb_rtxn, ssptr_t finished_ssptr, devdb::scan_stats_t& scan_stats);
+
+	bool retry_subscription_if_needed(ssptr_t finished_ssptr,
+																		scan_subscription_t& subscription,
+																		const chdb::any_mux_t& finished_mux,
+																		const blindscan_key_t& blindscan_key);
+
+	void housekeeping(bool force);
 
 public:
-	scan_t(	scanner_t& scanner, subscription_id_t scan_subscription_id, bool propagate_scan);
+	scan_t(	scanner_t& scanner, subscription_id_t scan_subscription_id);
 	scan_t(const scan_t& other) = delete;
-	scan_t(scan_t&& other)
-		:	scanner (other.scanner)
-		,	receiver_thread(other.receiver_thread)
-		, receiver(other.receiver)
-		, scan_id(other.scan_id)
-		, tune_options(std::move(other.tune_options))
-		, last_subscribed_mux (std::move(other.last_subscribed_mux))
-		, subscriptions(std::move(other.subscriptions))
-		, blindscans (std::move(other.blindscans))
-			/*deliberately omitting scan_stats as that cannot be moved
-				we need the move constructor try_emplace in scanner_t::scans
-			 */
-		{}
-
+	scan_t(scan_t&& other) = delete;
 };
 
 class scanner_t {
@@ -344,49 +477,61 @@ class scanner_t {
 	time_t scan_start_time{-1};
 	steady_time_t last_house_keeping_time{steady_clock_t::now()};
 	int max_num_subscriptions{std::numeric_limits<int>::max()};
-	bool scan_found_muxes;
-	chdb::any_mux_t last_subscribed_mux;
-	int id{0};
 	bool must_end = false;
-	tune_options_t tune_options{scan_target_t::SCAN_MINIMAL};
-
-	ss::vector<devdb::lnb_t, 16> allowed_lnbs;
-
+	subscription_options_t tune_options{devdb::scan_target_t::SCAN_MINIMAL};
 	std::map<subscription_id_t, scan_t> scans;
 
-	void set_allowed_lnbs(const ss::vector_<devdb::lnb_t>& lnbs);
-	void set_allowed_lnbs();
-
+	void end_scans(subscription_id_t scan_subscription_id);
 	template<typename mux_t>
-	int add_muxes(const ss::vector_<mux_t>& muxes, bool init, subscription_id_t subscription_id);
+	int add_muxes(const ss::vector_<mux_t>& muxes, const subscription_options_t& tune_options,
+								ssptr_t ssptr);
 
-	int add_peaks(const statdb::spectrum_key_t& spectrum_key, const ss::vector_<chdb::spectral_peak_t>& peaks,
-								bool init, subscription_id_t subscription_id);
-	void unsubscribe_scan(std::vector<task_queue_t::future_t>& futures,
-												db_txn& devdb_wtxn, subscription_id_t scan_subscription_id);
+	template<typename peak_t>
+	int add_spectral_peaks(const devdb::rf_path_t& rf_path,
+												 const statdb::spectrum_key_t& spectrum_key, const ss::vector_<peak_t>& peaks,
+												 ssptr_t ssptr, subscription_options_t* options=nullptr);
+
+	int add_bands(const ss::vector_<chdb::sat_t>& sats,
+								const ss::vector_<chdb::fe_polarisation_t>& pols,
+								const subscription_options_t& tune_options,
+								ssptr_t ssptr);
+
+	bool unsubscribe_scan(std::vector<task_queue_t::future_t>& futures,
+												db_txn& devdb_wtxn, ssptr_t scan_ssptr);
 
 	bool on_scan_mux_end(const devdb::fe_t& finished_fe, const chdb::any_mux_t& mux,
-											 uint32_t scan_id, subscription_id_t subscription_id);
+											 const chdb::scan_id_t& scan_id, const ssptr_t finished_ssptr);
 
+	bool on_spectrum_scan_band_end(const devdb::fe_t& finished_fe, const spectrum_scan_t& spectrum_scan,
+																 const chdb::scan_id_t& scan_id,
+																 const ss::vector_<subscription_id_t>& subscription_ids);
 	bool housekeeping(bool force);
+	subscription_id_t scan_subscription_id_for_scan_id(const chdb::scan_id_t& scan_id);
 
-	void init();
-//	void clear_peaks(const chdb::dvbs_mux_t& finished_mux);
+public:
+	scanner_t(receiver_thread_t& receiver_thread_, int max_num_subscriptions);
 
-	inline static uint32_t make_scan_id(subscription_id_t subscription_id) {
-		return (getpid() <<8)| (int) subscription_id;
+	~scanner_t();
+
+	inline static bool is_our_scan(const chdb::scan_id_t& scan_id) {
+		auto pid = getpid();
+		return (scan_id.pid == pid) && (int) scan_id.subscription_id >= 0;
 	}
 
-	subscription_id_t scan_subscription_id_for_scan_id(uint32_t scan_id);
-public:
-	scanner_t(receiver_thread_t& receiver_thread_,
-						//ss::vector_<chdb::dvbs_mux_t>& muxes, ss::vector_<devdb::lnb_t>* lnbs,
-						bool scan_found_muxes, int max_num_subscriptions);
-	using stats_t = safe::Safe<scan_stats_t>;
-	~scanner_t();
-	void notify_signal_info(const subscriber_t& subscriber, const ss::vector_<subscription_id_t>& subscriptions,
+
+	inline static bool is_scanning(const chdb::scan_id_t& scan_id) {
+		return scan_id.pid > 0 || (int) scan_id.subscription_id >= 0;
+	}
+
+	inline static int32_t scan_subscription_id(const chdb::scan_id_t& scan_id) {
+		auto pid = getpid();
+		return ((scan_id.pid) == pid) ? scan_id.subscription_id : -1;
+	}
+
+
+	void on_signal_info(const subscriber_t& subscriber, const ss::vector_<subscription_id_t>& subscription_ids,
 													const signal_info_t& signal_info);
-	void notify_sdt_actual(const subscriber_t& subscriber, const ss::vector_<subscription_id_t>& subscriptions,
-												 const sdt_data_t& sdt_data, dvb_frontend_t* fe);
+	void on_sdt_actual(const subscriber_t& subscriber, const ss::vector_<subscription_id_t>& subscription_ids,
+												 const sdt_data_t& sdt_data);
 
 };

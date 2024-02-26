@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -18,9 +18,6 @@
  *
  */
 #include "active_playback.h"
-#include "date/date.h"
-#include "date/iso_week.h"
-#include "date/tz.h"
 #include "mpm.h"
 #include "receiver.h"
 #include "util/logger.h"
@@ -34,9 +31,6 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
-using namespace date;
-using namespace date::clock_cast_detail;
-
 
 std::unique_ptr<playback_mpm_t> active_playback_t::make_client_mpm(receiver_t& receiver, subscription_id_t subscription_id) {
 	auto mpm = std::make_unique<playback_mpm_t>(receiver, subscription_id);

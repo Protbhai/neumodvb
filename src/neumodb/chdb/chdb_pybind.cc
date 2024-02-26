@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -44,6 +44,9 @@ static void export_chdb_extra(py::module& m) {
 		.def("select_reference_mux", &chdb::select_reference_mux,
 				"Select a reference mux for an lnb; choose a mux from the database or mux with good defaults",
 				 py::arg("chdb_rtxn"), py::arg("lnb"), py::arg("sat_pos").none(true) = nullptr)
+		.def("select_sat_for_sat_band", &chdb::select_sat_for_sat_band,
+				"Select a sat for a specific sat_band, prefering one with a close sat_pos",
+				 py::arg("chdb_rtxn"), py::arg("sat_band"), py::arg("sat_pos") = sat_pos_none)
 		;
 }
 
@@ -52,6 +55,25 @@ static void export_mux_extra(py::module& m) {
 	mm.def("make_unique_if_template", make_unique_if_template<dvbs_mux_t>,
 				 "Make the key of this mux unique, but only if network_id==mux_id==extra_id==0")
 		.def("list_distinct_sats", chdb::dvbs_mux::list_distinct_sats, "List distinct sat_pos of all muxes")
+		.def("find_by_sat_pos_freq_pol_fuzzy",
+				 [](db_txn& txn, int16_t sat_pos, int frequency, chdb::fe_polarisation_t pol, int stream_id, int t2mi_pid)
+				 -> std::optional<chdb::dvbs_mux_t> {
+					 using namespace chdb;
+					 dvbs_mux_t mux;
+					 mux.k.sat_pos = sat_pos;
+					 mux.frequency = frequency;
+					 mux.k.stream_id = stream_id;
+					 mux.k.t2mi_pid = t2mi_pid;
+					 mux.pol = pol;
+					 auto c = find_by_mux_fuzzy(txn, mux, false /*ignore_stream_id*/, false /*ignore_t2mi_pid*/);
+					 if(c.is_valid())
+						 return record_at_cursor<dvbs_mux_t, decltype(c)>(c);
+					 else
+						 return {};
+				 },
+				 "Find a mux by sat_pos, frequency and pol, allowing small differences in frequency and sat_pos",
+				 py::arg("chdb_rtxn"), py::arg("sat_pos"), py::arg("frequency"), py::arg("pol"),
+				 py::arg("stream_id")=-1, py::arg("t2mi_pid") = -1)
 		;
 
 	py::reinterpret_borrow<py::module>(m.attr("dvbc_mux"))
@@ -71,6 +93,10 @@ static void export_sat_extra(py::module& m) {
 	mm.attr("sat_pos_dvbt") = sat_pos_dvbt;
 	mm.attr("sat_pos_dvbs") = sat_pos_dvbs;
 	mm.attr("sat_pos_none") = sat_pos_none;
+	mm.def("freq_bounds", [](chdb::sat_band_t& sat_band) {
+		return chdb::sat_band_freq_bounds(sat_band, chdb::sat_sub_band_t::NONE);
+	}, "Frequency bounds for a satellite band",
+		py::arg("sat_band"));
 }
 
 static void export_chg_extra(py::module& m) {
@@ -118,36 +144,38 @@ PYBIND11_MODULE(pychdb, m) {
 	m.def(
 		"sat_pos_str", [](int sat_pos) { return std::string(sat_pos_str(sat_pos).c_str()); },
 		"make human readable representation", py::arg("sat_pos"))
+		.def("sat_band_for_freq", &chdb::sat_band_for_freq,
+				 "Sat band and low/high for frequency",
+				 py::arg("freq")
+			)
 		.def(
-			"key_src_str", [](key_src_t key_src) { return std::string(to_str(key_src).c_str()); },
+			"key_src_str", [](key_src_t key_src) { return std::string(fmt::format("{}",key_src)); },
 			"make human readable representation", py::arg("key_src"))
 		.def(
-			"tune_src_str", [](tune_src_t tune_src) { return std::string(to_str(tune_src).c_str()); },
+			"tune_src_str", [](tune_src_t tune_src) { return std::string(fmt::format("{}",tune_src)); },
 			"make human readable representation", py::arg("tune_src"))
 		.def("matype_str", [](int matype) { return std::string(matype_str(matype).c_str()); },
 				 "make human readable representation", py::arg("matype"))
 		.def(
-			"to_str", [](const sat_t& sat) { return to_str(sat).c_str(); }, "make human readable representation",
+			"to_str", [](const sat_t& sat) { return std::string(fmt::format("{}", sat)); },
+			"make human readable representation",
 			py::arg("sat"))
 		.def(
 			"to_str",
 			[](const dvbs_mux_t& mux) {
-				auto* x = to_str(mux).c_str();
-				return std::string(x);
+				return std::string(fmt::format("{}", mux));
 			},
 			"make human readable representation", py::arg("mux"))
 		.def(
 			"to_str",
 			[](const dvbc_mux_t& mux) {
-				auto* x = to_str(mux).c_str();
-				return std::string(x);
+				return std::string(fmt::format("{}", mux));
 			},
 			"make human readable representation", py::arg("mux"))
 		.def(
 			"to_str",
 			[](const dvbt_mux_t& mux) {
-				auto* x = to_str(mux).c_str();
-				return std::string(x);
+				return std::string(fmt::format("{}", mux));
 			},
 			"make human readable representation", py::arg("mux"))
 		.def("delsys_to_type", &chdb::delsys_to_type)

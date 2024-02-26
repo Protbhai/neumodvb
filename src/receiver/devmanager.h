@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -24,13 +24,17 @@
 #include "util/util.h"
 #include "neumodb/devdb/devdb_extra.h"
 #include "neumodb/chdb/chdb_extra.h"
-#include "tune_options.h"
+#include "neumodb/devdb/tune_options.h"
 #include "task.h"
 #include "util/safe/safe.h"
 #include "signal_info.h"
 #include "util/access.h"
+#include <boost/context/continuation_fcontext.hpp>
 
-struct tune_options_t;
+typedef boost::context::continuation continuation_t;
+
+struct subscription_options_t;
+class tuner_thread_t;
 
 /* DVB-S */
 /** lnb_slof: switch frequency of LNB */
@@ -130,7 +134,7 @@ public:
 };
 
 
-enum class  api_type_t {UNDEFINED, DVBAPI, NEUMO};
+enum class api_type_t {UNDEFINED, DVBAPI, NEUMO};
 
 struct spectrum_scan_t {
 	/*
@@ -141,25 +145,19 @@ struct spectrum_scan_t {
 		for those drivers that can compute candidates, we may as well compute them in user space (and
 		adapt the driver code, wh
 	 */
-	time_t start_time{};
-#if 1
+	system_time_t start_time{};
 	devdb::rf_path_t rf_path{};
-#else
-	devdb::lnb_key_t lnb_key;
-	//devdb::fe_key_t fe_key;
-	int64_t card_mac_address{-1};
-	int8_t rf_input{-1};
-#endif
 	int16_t adapter_no{-1};
 	int16_t usals_pos{sat_pos_none};
-	int16_t sat_pos{sat_pos_none};
+	chdb::sat_t sat;
 	ss::vector<int32_t,2> lof_offsets;
-	devdb::fe_band_pol_t band_pol;
+	chdb::sat_sub_band_pol_t band_pol;
 	dtv_fe_spectrum_method spectrum_method{SPECTRUM_METHOD_FFT};
 	int32_t start_freq{-1}; //in kHz
 	int32_t end_freq{-1}; //in kHz
 	uint32_t resolution{0}; //in kHz for spectrum and for blindscan
 
+	std::optional<statdb::spectrum_t> spectrum; //could be empty in case writing to filesystem fails
 	static constexpr int max_num_freq{65536};
 	static constexpr int max_num_peaks{512};
 	ss::vector<uint32_t, max_num_freq> freq;
@@ -196,9 +194,6 @@ class signal_monitor_t {
 	}
 };
 
-
-
-
 /*@brief: all reservation data for a tuner. reservations are modified atomically while holding
 	a lock. Afterwards the tune is requested to change state to the new reserved state, but this
 	may take some time
@@ -217,7 +212,7 @@ public:
 	std::optional<chdb::any_mux_t> received_si_mux; /* mux as received from the SI stream*/
 	bool received_si_mux_is_bad{false}; //true if content is deemed incorrect
 	devdb::lnb_t reserved_lnb; //lnb currently in use
-	devdb::rf_path_t reserved_rf_path; //rf_path currently in use
+	devdb::rf_path_t reserved_rf_path; //rf_path currently reserved
 
 	inline devdb::lnb_connection_t reserved_lnb_connection() const {
 		auto *conn = connection_for_rf_path(reserved_lnb, reserved_rf_path);
@@ -229,10 +224,15 @@ public:
 	bool info_valid{false}; // true if we could retrieve device info; "false" indicates an error
 	int fefd{-1}; //file handle if open
 	int last_saved_freq{0}; //for spectrum scan: last frequency written to spectrum file
-	tune_mode_t tune_mode{tune_mode_t::IDLE};
+	devdb::tune_mode_t tune_mode{devdb::tune_mode_t::IDLE};
 	bool use_blind_tune{false};
 	fe_lock_status_t lock_status;
-	tune_options_t tune_options{};
+	subscription_options_t tune_options;
+	system_time_t start_time;
+	std::optional<steady_time_t> positioner_start_move_time;
+
+	void set_lock_status(api_type_t api_type, fe_status_t fe_status);
+
 	std::optional<signal_info_t> last_signal_info; //last retrieved signal_info
 	/*
 		check if mux is the same transponder as the currently tuned on.
@@ -251,10 +251,23 @@ public:
 									 bool ignore_t2mi_pid) const;
 };
 
+/*
+	status of secondary equipment
+ */
 class sec_status_t {
 	bool tuned{false};
-	int voltage{-1}; // means unknown
-	int tone{-1}; // means unknown
+	int rf_input{-1}; //-1 means unknown or never set
+	std::optional<devdb::lnb_key_t> lnb_key; //set after diseqc has been sent
+	int16_t sat_pos{sat_pos_none}; //set after diseqc has been sent
+	bool rf_input_changed{false}; // true means that rf_input was changed and we have not set voltage yet
+
+	int voltage{-1};  // -1 means unknown or never set
+	int tone{-1};     // -1 means unknown or never set
+	steady_time_t powerup_time; //time when lnb was last powered up (any voltage > 0)
+
+	int set_rf_input(int fefd, int rf_input);
+	std::tuple<bool,bool> need_diseqc_or_lnb(const devdb::rf_path_t& new_rf_path, const devdb::lnb_t& new_lnb,
+																					 int16_t new_sat_pos,  const subscription_options_t& tune_options);
 public:
 	int retune_count{0};
 	bool is_tuned() const {
@@ -267,15 +280,29 @@ public:
 		1: tone was set as wanted
 	 */
 	int set_voltage(int fefd, fe_sec_voltage v);
-
-	fe_sec_tone_mode get_tone() const {
+	std::tuple<bool, bool, bool>
+	set_rf_path(int fefd, const devdb::rf_path_t& new_rf_path,
+							const devdb::lnb_t& lnb, int16_t sat_pos,
+							const subscription_options_t& tune_options, bool set_rf_input);
+	inline void diseqc_done(const devdb::lnb_key_t& lnb_key, int16_t sat_pos) {
+		this->lnb_key = lnb_key;
+		this->sat_pos = sat_pos;
+	}
+	inline fe_sec_tone_mode get_tone() const {
 		return (fe_sec_tone_mode) tone;
 	}
 
-	fe_sec_voltage get_voltage() const {
+	inline fe_sec_voltage get_voltage() const {
 		return (fe_sec_voltage) voltage;
 	}
 
+	inline int positioner_wait_after_powerup(int ms) const {
+		assert(voltage != SEC_VOLTAGE_OFF);
+		auto deadline  = powerup_time + std::chrono::milliseconds(ms);
+		std::this_thread::sleep_until (deadline);
+		dtdebugf("slept after powerup");
+		return 0;
+	}
 	/*
 		returns -1 : error
 		0: tone was already correct
@@ -294,37 +321,25 @@ public:
 	}
 };
 
-
-//owned by monitor thread
+//owned by active_adapter_t and tuner_thread_t
 class dvb_frontend_t : public std::enable_shared_from_this<dvb_frontend_t>
 {
-	friend class fe_monitor_thread_t;
-
+	friend class active_adapter_t;
+	friend class tuner_thread_t;
+	continuation_t main_fiber;
+	continuation_t task_fiber;
+	bool must_abort_task{false};
 	adaptermgr_t* adaptermgr;
-	const api_type_t api_type { api_type_t::UNDEFINED };
-	const int api_version{-1}; //1000 times the floating point value of version
+
 	chdb::delsys_type_t current_delsys_type { chdb::delsys_type_t::NONE };
 
 	int num_constellation_samples{0};
-
-	int check_frontend_parameters();
-	uint32_t get_lo_frequency(uint32_t frequency);
-	int open_device(fe_state_t& t, bool rw=true, bool allow_failure=false);
-	void close_device(fe_state_t& t); //callable from main thread
-	signal_info_t get_signal_info(bool get_constellation);
-	int request_signal_info(cmdseq_t& cmdseq, signal_info_t& ret, bool get_constellation);
-	int get_mux_info(signal_info_t& ret, const cmdseq_t& cmdseq, api_type_t api);
-	std::optional<statdb::spectrum_t> get_spectrum(const ss::string_& spectrum_path);
-	void start_frontend_monitor();
-
-	std::tuple<bool,bool> need_diseqc_or_lnb(const devdb::rf_path_t& new_rf_path,
-																					 const devdb::lnb_t& new_lnb, const chdb::dvbs_mux_t& new_mux,
-																					 const devdb::resource_subscription_counts_t& counts);
-	bool need_diseqc(const devdb::rf_path_t& new_rf_path, const devdb::lnb_t& new_lnb);
-
 	sec_status_t sec_status;
-public:
+	std::shared_ptr<fe_monitor_thread_t> monitor_thread;
 
+public:
+	const api_type_t api_type { api_type_t::UNDEFINED };
+	const int api_version{-1}; //1000 times the floating point value of version
 	static constexpr uint32_t lnb_lof_standard = DEFAULT_LOF_STANDARD;
 	static constexpr uint32_t  lnb_slof = DEFAULT_SLOF;
 	static constexpr uint32_t lnb_lof_low = DEFAULT_LOF1_UNIVERSAL;
@@ -340,40 +355,68 @@ public:
 	std::condition_variable ts_cv;
 	safe::Safe<signal_monitor_t> signal_monitor;
 
-	std::shared_ptr<fe_monitor_thread_t> monitor_thread; //public (used in active_si_stream.cc)
-	void stop_frontend_monitor_and_wait();
+private:
+	__attribute__((optnone)) //Without this  the code will crash!
+	void resume_task();
+	bool wait_for(tuner_thread_t& tuner_thread, double seconds);
 
-	static std::tuple<api_type_t, int> get_api_type(); //returns api_type and version
+	void run_task(auto&& task);
 
-	void set_lock_status(fe_status_t fe_status);
-	void clear_lock_status();
-
-	/*TODO:  dvb_frontend_t acts both as an interface to the outside world and
-		as a provider of low level calls towards the driver.
-		Move the latter to fe_monitor_thread_t ? Unless those needed when monitor_thread is not running
-	*/
-	fe_lock_status_t get_lock_status();
-	int tune_(const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb, const chdb::dvbs_mux_t& mux,
-						const tune_options_t& options);
-
-	std::tuple<int, int>
-	tune(const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb, const chdb::dvbs_mux_t& mux,
-			 const tune_options_t& tune_options,
-			 bool user_requested, const devdb::resource_subscription_counts_t& use_counts);
-
-	int tune_(const chdb::dvbt_mux_t& mux, const tune_options_t& options);
-	int tune_(const chdb::dvbc_mux_t& mux, const tune_options_t& options);
-
-	template<typename mux_t>
-	int tune(const mux_t& mux, const tune_options_t& tune_options, bool user_requested);
-
-	std::tuple<int, int>
-	lnb_spectrum_scan(const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb, tune_options_t tune_options);
-	int start_lnb_spectrum_scan(const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb,
-															const tune_options_t& tune_options);
-
+	int check_frontend_parameters();
+	uint32_t get_lo_frequency(uint32_t frequency);
 	int send_diseqc_message(char switch_type, unsigned char port, unsigned char extra, bool repeated);
 	int send_positioner_message(devdb::positioner_cmd_t cmd, int32_t par, bool repeated=false);
+
+	int get_mux_info(signal_info_t& ret, const cmdseq_t& cmdseq, api_type_t api);
+
+	void start_frontend_monitor();
+
+	int start_lnb_spectrum_scan(const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb);
+
+	bool wait_for_positioner(tuner_thread_t& tuner_thread);
+
+	int tune_(const chdb::dvbt_mux_t& mux, const subscription_options_t& options);
+	int tune_(const chdb::dvbc_mux_t& mux, const subscription_options_t& options);
+	int tune_(const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb, const chdb::dvbs_mux_t& mux,
+						const subscription_options_t& options);
+
+	std::tuple<int, int>
+	tune(tuner_thread_t& tuner_thread,
+			 const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb, const chdb::dvbs_mux_t& mux,
+			 const subscription_options_t& tune_options);
+
+
+	std::tuple<int, int>
+	lnb_spectrum_scan(tuner_thread_t& tuner_thread, const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb,
+										const subscription_options_t& tune_options);
+
+
+	template<typename mux_t>
+	int tune(const mux_t& mux, const subscription_options_t& tune_options);
+
+	template<typename mux_t>
+	void request_retune(tuner_thread_t& tuner_thread, bool user_requested);
+
+	void request_tune(tuner_thread_t& tuner_thread,
+										const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb, const chdb::dvbs_mux_t& mux,
+										const subscription_options_t& tune_options);
+
+
+	template<typename mux_t>
+	void request_tune(const mux_t& mux, const subscription_options_t& tune_options);
+
+	void request_lnb_spectrum_scan(tuner_thread_t& tuner_thread,
+																 const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb,
+																 const subscription_options_t& tune_options);
+
+int request_positioner_control(const devdb::rf_path_t& rf_path, const devdb::lnb_t& lnb,
+															 const subscription_options_t& tune_options);
+
+	std::tuple<int, int, int, double>
+	get_positioner_move_stats(int16_t old_usals_pos, int16_t new_usals_pos, steady_time_t now) const;
+
+	int request_signal_info(cmdseq_t& cmdseq, signal_info_t& ret, bool get_constellation);
+
 
 	int stop();
 	int start();
@@ -385,7 +428,48 @@ public:
 	}
 	int reset_ts();
 
-	devdb::usals_location_t get_usals_location() const;
+	int start_fe_and_lnb(const devdb::rf_path_t& rf_path, const devdb::lnb_t & lnb);
+
+	int start_fe_lnb_and_mux(const devdb::rf_path_t& rf_path, const devdb::lnb_t & lnb, const chdb::dvbs_mux_t& mux);
+
+	template<typename mux_t>
+	int start_fe_and_dvbc_or_dvbt_mux(const mux_t& mux);
+
+	/*!
+		returns the new mux use count
+	*/
+	int release_fe();
+
+	std::tuple<int, int> diseqc(int16_t sat_pos, chdb::sat_sub_band_t sat_sub_band,
+															fe_sec_voltage_t lnb_voltage, bool skip_positioner);
+	std::tuple<int, int> do_lnb_and_diseqc(int16_t sat_pos, chdb::sat_sub_band_t band, fe_sec_voltage_t lnb_voltage,
+																				 bool skip_positioner);
+	int do_lnb(chdb::sat_sub_band_t band, fe_sec_voltage_t lnb_voltage);
+	int positioner_cmd(devdb::positioner_cmd_t cmd, int par);
+
+	inline int set_tune_options(const subscription_options_t& tune_options) {
+		auto w = this->ts.writeAccess();
+		w->tune_options = tune_options;
+		return 0;
+	}
+
+	inline void update_dbfe(const std::optional<devdb::fe_t>& dbfe) {
+		this->ts.writeAccess()->dbfe = dbfe ? *dbfe : devdb::fe_t{};
+	}
+	inline std::optional<signal_info_t> get_last_signal_info(bool wait) {
+		auto fn = [this] () {
+			return ts.readAccess()->last_signal_info;
+		};
+		auto ret = fn();
+		if (wait && !ret) {
+			std::unique_lock<std::mutex> lk(ts.mutex());
+			ts_cv.wait(lk, [&]() {
+				ret = ts.readAccess(std::adopt_lock)->last_signal_info;//adopt_lock because ts.mutex() has been locked now
+				return ret;
+			});
+		}
+		return ret;
+	}
 
 public:
 	dvb_frontend_t(adaptermgr_t* adaptermgr_,
@@ -403,6 +487,21 @@ public:
 																							 frontend_no_t frontend_no,
 																							 api_type_t api_type,  int api_version);
 
+	int open_device(bool rw=true);
+	void close_device();
+
+	void stop_frontend_monitor_and_wait();
+
+	std::optional<signal_info_t> update_lock_status_and_signal_info(fe_status_t fe_status, bool get_constellation);
+	std::optional<spectrum_scan_t> get_spectrum(const ss::string_& spectrum_path);
+
+	fe_lock_status_t get_lock_status();
+	void set_lock_status(fe_status_t fe_status);
+	void clear_lock_status();
+
+	static std::tuple<api_type_t, int> get_api_type(); //returns api_type and version
+	devdb::usals_location_t get_usals_location() const;
+
 	inline chdb::any_mux_t tuned_mux() const {
 		return this->ts.readAccess()->reserved_mux;
 	}
@@ -413,6 +512,15 @@ public:
 
 	inline devdb::fe_t dbfe() const {
 		return this->ts.readAccess()->dbfe;
+	}
+
+	inline auto get_subscription_ids() const {
+		ss::vector<subscription_id_t, 4> subscription_ids;
+		auto r = this->ts.readAccess();
+		for(auto& sub: r->dbfe.sub.subs) {
+			subscription_ids.push_back((subscription_id_t)sub.subscription_id);
+		}
+		return subscription_ids;
 	}
 
 	template<typename mux_t>
@@ -430,49 +538,6 @@ public:
 
 	~dvb_frontend_t();
 
-	int start_fe_and_lnb(const devdb::rf_path_t& rf_path, const devdb::lnb_t & lnb);
-
-	int start_fe_lnb_and_mux(const devdb::rf_path_t& rf_path, const devdb::lnb_t & lnb, const chdb::dvbs_mux_t& mux);
-
-	template<typename mux_t>
-	int start_fe_and_dvbc_or_dvbt_mux(const mux_t& mux);
-
-	/*!
-		returns the new mux use count
-	*/
-	int release_fe();
-
-	std::tuple<int, int> diseqc(bool skip_positioner);
-	std::tuple<int, int> do_lnb_and_diseqc(devdb::fe_band_t band, fe_sec_voltage_t lnb_voltage);
-	int do_lnb(devdb::fe_band_t band, fe_sec_voltage_t lnb_voltage);
-	int positioner_cmd(devdb::positioner_cmd_t cmd, int par);
-
-	inline int set_tune_options(const tune_options_t& tune_options) {
-		auto w = this->ts.writeAccess();
-		auto tune_mode = (tune_options.tune_mode == tune_mode_t::UNCHANGED) ? tune_options.tune_mode
-			: tune_options.tune_mode;
-		w->tune_options = tune_options;
-		w->tune_options.tune_mode = tune_mode;
-		return 0;
-	}
-
-	inline void update_dbfe(const devdb::fe_t& fe) {
-		this->ts.writeAccess()->dbfe = fe;
-	}
-	inline std::optional<signal_info_t> get_last_signal_info(bool wait) {
-		auto fn = [this] () {
-			return ts.readAccess()->last_signal_info;
-		};
-		auto ret = fn();
-		if (wait && !ret) {
-			std::unique_lock<std::mutex> lk(ts.mutex(), std::adopt_lock);
-			ts_cv.wait(lk, [&]() {
-				ret = ts.readAccess(std::adopt_lock)->last_signal_info;
-				return ret;
-			});
-		}
-		return ret;
-	}
 };
 
 class use_count_t {
@@ -529,10 +594,8 @@ private:
 	bool is_paused{false};
 	std::shared_ptr<dvb_frontend_t> fe{nullptr};
 
-	void monitor_signal();
-	virtual int exit() final {
-		return -1;
-	}
+	void update_lock_status_and_signal_info(fe_status_t fe_status);
+	virtual int exit() final;
 
 	inline void handle_frontend_event();
 public:
@@ -545,6 +608,7 @@ public:
 		{
 		}
 
+	bool wait_for(double seconds);
 	static std::shared_ptr<fe_monitor_thread_t> make
 	(receiver_t& receiver_, std::shared_ptr<dvb_frontend_t>& fe_);
 
@@ -574,7 +638,9 @@ private:
 	api_type_t api_type { api_type_t::UNDEFINED };
 	int api_version{-1}; //1000 times the floating point value of version
 
-	std::map<std::tuple<adapter_no_t, frontend_no_t>, std::shared_ptr<dvb_frontend_t>>  frontends;
+	using frontend_map = std::map<std::tuple<adapter_no_t, frontend_no_t>, std::shared_ptr<dvb_frontend_t>>;
+	using safe_frontend_map = safe::thread_public_t<false, frontend_map>;
+	safe_frontend_map frontends{"receiver", thread_group_t::receiver, {}}; //frontends, indexed by (adapter_no, frontend_no)
 	int inotfd{-1};
 
 	virtual ~adaptermgr_t() = default; //to make dynamic_cast work
@@ -583,7 +649,7 @@ private:
 		{}
 
 	inline std::shared_ptr<dvb_frontend_t>	find_fe(const devdb::fe_key_t& fe_key) const {
-		auto [it, found] = find_in_map_if(frontends, [&fe_key](const auto& x) {
+		auto [it, found] = find_in_safe_map_if_with_owner_read_ref(frontends, [&fe_key](const auto& x) {
 			auto& [key_, fe] = x;
 			return (int64_t) fe->adapter_mac_address == fe_key.adapter_mac_address &&
 				(int) fe->frontend_no == fe_key.frontend_no;
@@ -594,18 +660,6 @@ private:
 public:
 	receiver_t& receiver;
 
-	template<typename mux_t>
-	std::shared_ptr<dvb_frontend_t>
-	find_fe_for_tuning_to_mux
-	(db_txn& txn, const mux_t& mux, const dvb_frontend_t* fe_to_release,
-	 const tune_options_t& tune_options) const;
-
-
-	std::tuple<std::shared_ptr<dvb_frontend_t>,  devdb::rf_path_t, devdb::lnb_t, devdb::resource_subscription_counts_t>
-	find_fe_and_lnb_for_tuning_to_mux
-	(db_txn& txn, const chdb::dvbs_mux_t& mux, const devdb::rf_path_t* required_rf_path,
-	 const dvb_frontend_t* fe_to_release, const tune_options_t& tune_options) const;
-
 	int get_fd() const {
 		return inotfd;
 	}
@@ -615,6 +669,17 @@ public:
 	std::tuple<std::string, int> get_api_type() const;
 
 	void renumber_card(int old_number, int new_number);
+
+	inline std::shared_ptr<dvb_frontend_t>	fe_for_dbfe(const devdb::fe_key_t& fe_key) const {
+		auto [it, found] = find_in_safe_map_if(frontends, [&fe_key](const auto& x) {
+			auto& [key_, fe] = x;
+			return (int64_t) fe->adapter_mac_address == fe_key.adapter_mac_address &&
+				(int) fe->frontend_no == fe_key.frontend_no;
+		});
+		return found ? it->second : nullptr; //TODO
+	}
+
+
 
 	static std::shared_ptr<adaptermgr_t> make(receiver_t& receiver);
 };

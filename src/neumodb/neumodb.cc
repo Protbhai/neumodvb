@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -29,7 +29,7 @@ void neumodb_t::init(const all_schemas_t& all_sw_schemas) {
 }
 
 neumodb_t::neumodb_t(bool readonly_, bool is_temp_, bool autoconvert_, bool autoconvert_major_version_)
-	:  autoconvert(autoconvert_)
+	:  autoconvert(autoconvert_ &&! readonly_)
 	,  autoconvert_major_version(autoconvert_major_version_)
 	, is_temp(is_temp_)
 	, readonly(readonly_)
@@ -81,7 +81,7 @@ int convert_db(neumodb_t& from_db, neumodb_t& to_db, unsigned int put_flags) {
 			ss::bytebuffer<32> key;
 			from_cursor.get_serialized_key(key);
 			if (key.size() <= (int)sizeof(uint32_t)) {
-				dterror("This key is too short");
+				dterrorf("This key is too short");
 				continue;
 			}
 			auto encoded_type_id = *(uint32_t*)key.buffer();
@@ -89,9 +89,9 @@ int convert_db(neumodb_t& from_db, neumodb_t& to_db, unsigned int put_flags) {
 			auto* desc = current.schema_for_type(type_id);
 			if (desc == nullptr) {
 				if (type_id == data_types::data_type<schema::neumo_schema_t>()) {
-					dtdebug("schema record found");
+					dtdebugf("schema record found");
 				} else {
-					dtdebugx("unrecognized type=0x%x", type_id);
+					dtdebugf("unrecognized type=0x{:x}", type_id);
 				}
 				continue;
 			}
@@ -102,7 +102,7 @@ int convert_db(neumodb_t& from_db, neumodb_t& to_db, unsigned int put_flags) {
 		to_db.store_schema(to_txn, put_flags);
 		to_txn.commit();
 	} catch (...) {
-		dterror("EXCEPTION occurred");
+		dterrorf("EXCEPTION occurred");
 		return -1;
 	}
 	return 1;
@@ -110,6 +110,8 @@ int convert_db(neumodb_t& from_db, neumodb_t& to_db, unsigned int put_flags) {
 
 //[[clang::optnone]]
 int stats_db(neumodb_t& db) {
+	schema::schema_t schemadb;
+
 	std::map<int,int> key_sizes;
 	std::map<int,int> val_sizes;
 	std::map<int,int> record_counts;
@@ -125,17 +127,18 @@ int stats_db(neumodb_t& db) {
 		auto from_cursor = for_index ?
 			db.generic_get_first(from_txn, db.dbi_index):
 			db.generic_get_first(from_txn);
-		printf("------------\n");
+		printf("\t------------\n");
 		if(for_index) {
-			printf("INDEX records\n");
+			printf("\tINDEX records\n");
 		} else  {
-			printf("DATA records\n");
+			printf("\tDATA records\n");
 		}
 		/*Check if both databases are related; this does NOT compare if the stored
 			schemas match, but rather that the programmer does not try to convert
 			unrelated databases; the test is a partial test (checks pointers)
 		*/
 		auto& current = *db.dbdesc;
+		auto& schema_dbdesc = schemadb.dbdesc;
 		for (auto status = from_cursor.is_valid(); status; status = from_cursor.next()) {
 			ss::bytebuffer<32> key;
 			ss::bytebuffer<128> val;
@@ -150,8 +153,8 @@ int stats_db(neumodb_t& db) {
 				auto it = index_names.find(index_id);
 
 				if(it == index_names.end()) {
-					auto* desc = current.schema_for_type(index_desc->type_id);
-					index_names[index_id] = record_names[desc->type_id] + " " +
+					auto* desc = index_desc ? current.schema_for_type(index_desc->type_id) : nullptr;
+					index_names[index_id] = (desc ? record_names[desc->type_id] : "NONAME:") + " " +
 						std::string(index_desc? index_desc->name.c_str() : "NONAME");
 				}
 				index_key_sizes[index_id] += key.size();
@@ -159,6 +162,8 @@ int stats_db(neumodb_t& db) {
 				index_counts[index_id] ++;
 			} else {
 				auto* desc = current.schema_for_type(type_id);
+				if(!desc)
+					desc = schema_dbdesc->schema_for_type(type_id);
 				auto it = record_names.find(type_id);
 				if(it == record_names.end())
 					record_names[type_id] = std::string(desc? desc->name.c_str() : "NONAME");
@@ -173,7 +178,7 @@ int stats_db(neumodb_t& db) {
 			for(auto [type_id, count] : record_counts) {
 				auto key_size = key_sizes[type_id];
 				auto val_size = val_sizes[type_id];
-				printf("%s (0x%x): %d records; key_size=%d val_size=%d\n",
+				printf("\t%s (0x%x): %d records; key_size=%d val_size=%d\n",
 							 record_names[type_id].c_str(),
 							 type_id, count, key_size, val_size);
 			}
@@ -181,22 +186,16 @@ int stats_db(neumodb_t& db) {
 			for(auto [index_id, count] : index_counts) {
 				auto index_key_size = index_key_sizes[index_id];
 				auto index_val_size = index_val_sizes[index_id];
-				printf("%s (0x%x): %d idx records; key_size=%d val_size=%d\n",
+				printf("\t%s (0x%x): %d idx records; key_size=%d val_size=%d\n",
 							 index_names[index_id].c_str(),
 							 index_id, count, index_key_size, index_val_size);
 			}
 
 		}
-		printf("------------\n\n");
+		printf("\t------------\n\n");
 
 	}
 	return 1;
-}
-
-int neumodb_t::wait_for_activity(int old_txn_id) {
-	std::unique_lock<std::mutex> lk(activity_mutex);
-	activity_cv.wait(lk, [this, old_txn_id] { return last_txn_id > old_txn_id; });
-	return last_txn_id;
 }
 
 void neumodb_t::open(const char* dbpath, bool allow_degraded_mode, const char* table_name, bool use_log,
@@ -216,10 +215,10 @@ void neumodb_t::open_(const char* dbpath, bool allow_degraded_mode, const char* 
 		}
 		if (is_temp) {
 			envp->set_max_dbs((MDB_dbi)128);
-			envp->open(dbpath, MDB_NOTLS | MDB_NOSYNC | MDB_WRITEMAP, 0664); // MDB_NOTLS not needed?
+			envp->open(dbpath, MDB_NOTLS | MDB_NOSYNC | MDB_WRITEMAP, 0664);
 		} else {
 			envp->set_max_dbs((MDB_dbi)12);
-			envp->open(dbpath, MDB_NOTLS | extra_flags, 0664); // MDB_NOTLS not needed?
+			envp->open(dbpath, MDB_NOTLS | extra_flags, 0664);
 		}
 		envp->set_mapsize(mapsize);
 		clean_stale_readers(dbpath);
@@ -230,13 +229,13 @@ void neumodb_t::open_(const char* dbpath, bool allow_degraded_mode, const char* 
 		*/
 		if (table_name) {
 			ss::string<16> name;
-			name.sprintf("%s_data", table_name);
+			name.format("{:s}_data", table_name);
 			dbi = lmdb::dbi(lmdb::dbi::open(txn, name.c_str(), MDB_CREATE));
 			name.clear();
-			name.sprintf("%s_index", table_name);
+			name.format("{:s}_index", table_name);
 			dbi_index = lmdb::dbi(lmdb::dbi::open(txn, name.c_str(), MDB_CREATE | MDB_DUPSORT));
 			name.clear();
-			name.sprintf("%s_log", table_name);
+			name.format("{:s}_log", table_name);
 			dbi_log = lmdb::dbi(lmdb::dbi::open(txn, name.c_str(), MDB_CREATE | MDB_DUPSORT));
 		} else {
 			dbi = lmdb::dbi(lmdb::dbi::open(txn, "data", MDB_CREATE));
@@ -245,13 +244,13 @@ void neumodb_t::open_(const char* dbpath, bool allow_degraded_mode, const char* 
 		}
 		txn.commit();
 	} catch (...) {
-		dterrorx("Fatal error opening lmdb database %s", dbpath);
+		dterrorf("Fatal error opening lmdb database {}", dbpath);
 		is_open_ = false;
-		assert(0);
+		return;
 	}
 	if (load_and_check_schema() < 0) {
 		if (allow_degraded_mode) {
-			dtdebug("opening database in degraded mode");
+			dtdebugf("opening database in degraded mode");
 		} else {
 			is_open_ = false;
 			throw db_needs_upgrade_exception("Bad database, or database needs to be upgraded");
@@ -290,14 +289,14 @@ void neumodb_t::open_temp(const char* where, bool allow_degraded_mode, const cha
 		ss::string<256> templ{"/tmp/neumo.mdb.XXXXXX"};
 		char* path = mkdtemp(templ.c_str());
 		if (!path) {
-			dterrorx("mkdtemp %s failed: %s", templ.c_str(), strerror(errno));
+			dterrorf("mkdtemp {} failed: {}", templ.c_str(), strerror(errno));
 			return;
 		}
 		open(path, allow_degraded_mode, table_name, mapsize);
 		std::filesystem::remove_all(std::filesystem::path(path));
 		use_log = false;
 	} catch (...) {
-		dterrorx("Fatal error opening temporary lmdb database in %s", where);
+		dterrorf("Fatal error opening temporary lmdb database in {}", where);
 		is_open_ = false;
 		use_log = false;
 		assert(0);
@@ -315,23 +314,23 @@ void neumodb_t::open_secondary(const char* table_name, bool allow_degraded_mode)
 		// all data is stored in a single table, for simplicity
 		// all index data is stored in a separate table to allow duplicate secondary keys
 		ss::string<16> name;
-		name.sprintf("%s_data", table_name);
+		name.format("{:s}_data", table_name);
 		dbi = lmdb::dbi(lmdb::dbi::open(txn, name.c_str(), MDB_CREATE));
 		name.clear();
-		name.sprintf("%s_index", table_name);
+		name.format("{:s}_index", table_name);
 		dbi_index = lmdb::dbi(lmdb::dbi::open(txn, name.c_str(), MDB_CREATE | MDB_DUPSORT));
 		name.clear();
-		name.sprintf("%s_log", table_name);
+		name.format("{:s}_log", table_name);
 		dbi_log = lmdb::dbi(lmdb::dbi::open(txn, name.c_str(), MDB_CREATE | MDB_DUPSORT));
 		txn.commit();
 	} catch (...) {
-		dterrorx("Fatal error opening lmdb database %s", table_name);
+		dterrorf("Fatal error opening lmdb database {}", table_name);
 		is_open_ = false;
 		throw;
 	}
 	if (load_and_check_schema() < 0) {
 		if (allow_degraded_mode) {
-			dtdebug("opening database in degraded mode");
+			dtdebugf("opening database in degraded mode");
 		} else {
 			is_open_ = false;
 			throw std::runtime_error("Bad database, or database needs to be upgraded");
@@ -352,9 +351,9 @@ void neumodb_t::drop_table(bool del) {
 #if 0
 void print_schema(schema::neumo_schema_t& s) {
 	for (const auto& r : s.schema) {
-		printf("record: type=%d vers=%d num_fields=%d\n", r.type_id, r.record_version, r.fields.size());
+		printf("record: type={:d} vers={:d} num_fields={:d}\n", r.type_id, r.record_version, r.fields.size());
 		for (const auto& i : r.fields) {
-			printf("   field: id=%d type=%d ser_size=%d type=%s name=%s\n", i.field_id, i.type_id, i.serialized_size,
+			printf("   field: id={:d} type={:d} ser_size={:d} type=%s name=%s\n", i.field_id, i.type_id, i.serialized_size,
 						 i.type.c_str(), i.name.c_str());
 		}
 	}
@@ -388,10 +387,10 @@ int neumodb_t::load_schema_(db_txn& txn) {
 		} else {
 			bool major_schema_change = current.schema_version	!= stored.schema_version;
 			if(major_schema_change) {
-				dtdebugx("major database schema change from version %d to %d\n",
-								 stored.schema_version, current.schema_version);
+				dtdebugf("{:s}: major database schema change from version {} to {}",
+								 db_type, stored.schema_version, current.schema_version);
 			} else {
-				dtdebugx("minor databased schema change\n");
+				dtdebugf("minor database schema change\n");
 			}
 			schema_is_current = false;
 			/*
@@ -436,40 +435,6 @@ int neumodb_t::load_and_check_schema() {
 	use_dynamic_keys = saved_use_dynamic_keys;
 	return 0;
 }
-
-std::ostream& operator<<(std::ostream& os, field_matcher_t::match_type_t match_type) {
-	typedef field_matcher_t::match_type_t m_t;
-	switch (match_type) {
-	case m_t::EQ:
-		os << "EQ";
-		break;
-	case m_t::LEQ:
-		os << "LEQ";
-		break;
-	case m_t::GEQ:
-		os << "GEQ";
-		break;
-	case m_t::LT:
-		os << "LT";
-		break;
-	case m_t::GT:
-		os << "GT";
-		break;
-	case m_t::STARTSWITH:
-		os << "STARTSWITH";
-		break;
-	default:
-		os << "???";
-		break;
-	}
-	return os;
-}
-
-std::ostream& operator<<(std::ostream& os, const field_matcher_t& matcher) {
-	os << matcher.match_type << "(" << ((int)matcher.field_id) << ")";
-	return os;
-}
-
 
 #ifdef PURE_PYTHON
 ss::string<32>  data_types::typename_for_type_id(int32_t type_id)
@@ -536,3 +501,49 @@ ss::string<32>  data_types::typename_for_type_id(int32_t type_id)
 	return ret;
 }
 #endif
+
+
+fmt::format_context::iterator
+fmt::formatter<field_matcher_t::match_type_t>::format(
+	const field_matcher_t::match_type_t& match_type, format_context& ctx) const {
+	const char* p{nullptr};
+	typedef field_matcher_t::match_type_t m_t;
+	switch (match_type) {
+	case m_t::EQ:
+		p = "EQ";
+		break;
+	case m_t::LEQ:
+		p = "LEQ";
+		break;
+	case m_t::GEQ:
+		p = "GEQ";
+		break;
+	case m_t::LT:
+		p = "LT";
+		break;
+	case m_t::GT:
+		p = "GT";
+		break;
+	case m_t::STARTSWITH:
+		p = "STARTSWITH";
+		break;
+	case m_t::CONTAINS:
+		p = "CONTAINS";
+		break;
+	default:
+		p = "???";
+		break;
+	}
+	return fmt::format_to(ctx.out(), "{}", p);
+}
+
+fmt::format_context::iterator
+fmt::formatter<field_matcher_t>::format(
+	const field_matcher_t& matcher, format_context& ctx) const {
+	return fmt::format_to(ctx.out(), "{}({:d})", matcher.match_type, (int)matcher.field_id);
+}
+
+
+thread_local const char* lmdb_file="";
+thread_local int lmdb_line{-1};
+thread_local int lmdb_count{0};

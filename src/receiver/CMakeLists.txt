@@ -2,7 +2,7 @@ find_package(wxWidgets REQUIRED net gl core base)
 include(${wxWidgets_USE_FILE})
 
 
-add_library(neumoreceiver SHARED  receiver.cc subscriber.cc subscriber_notify.cc tune.cc scan.cc
+add_library(neumoreceiver SHARED  receiver.cc commands.cc subscriber.cc subscriber_notify.cc tune.cc scan.cc
   active_adapter.cc devmanager.cc fe_monitor.cc options.cc
   active_si_stream.cc recmgr.cc frontend.cc scam.cc
   active_stream.cc active_service.cc filemapper.cc live_mpm.cc active_playback.cc playback_mpm.cc
@@ -10,8 +10,9 @@ add_library(neumoreceiver SHARED  receiver.cc subscriber.cc subscriber_notify.cc
 
 
 target_precompile_headers(neumoreceiver PRIVATE
-  active_playback.h active_stream.h dvbcsa.h subscriber.h options.h reservation.h signal_info.h
-  active_adapter.h active_service.h devmanager.h filemapper.h neumofrontend.h receiver.h scam.h
+  txnmgr.h
+  active_playback.h active_stream.h dvbcsa.h subscriber.h options.h signal_info.h
+  active_adapter.h active_service.h devmanager.h filemapper.h neumofrontend.h tuner.h receiver.h scam.h
   active_si_stream.h dvbapi.h mpm.h neumo.h recmgr.h scan.h task.h
   )
 
@@ -21,11 +22,11 @@ set_source_files_properties( subscriber_notify.cc COMPILE_FLAGS ${EXTRA_FLAGS_ST
 
 add_dependencies(neumoreceiver chdb statdb epgdb recdb recdb stackstring streamparser)
 
-target_link_libraries(neumoreceiver PUBLIC chdb statdb epgdb recdb neumoutil neumodb streamparser config++ PRIVATE dvbcsa ${wxWidgets_LIBRARIES})
+target_link_libraries(neumoreceiver PUBLIC chdb statdb epgdb recdb neumoutil neumodb streamparser config++
+  fmt::fmt PRIVATE dvbcsa ${wxWidgets_LIBRARIES})
 
-
-target_compile_options(neumoreceiver PUBLIC -fPIC -fsized-deallocation) #needed to prevent operator delete error
-install (TARGETS neumoreceiver  DESTINATION lib64)
+target_compile_options(neumoreceiver PUBLIC -fPIC -fvisibility=hidden -fsized-deallocation) #needed to prevent operator delete error
+install (TARGETS neumoreceiver  DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 add_executable(neumo-blindscan neumo-blindscan.cc dvb_strings.cc)
 add_executable(neumo-tune neumo-tune.cc dvb_strings.cc)
@@ -63,8 +64,8 @@ target_link_libraries(pyreceiver PRIVATE neumoutil)
 string (REPLACE ";" " " EXTRA_FLAGS_STR "${GTK3_CFLAGS}")
 set_source_files_properties(subscriber_pybind.cc COMPILE_FLAGS "${EXTRA_FLAGS_STR}" )
 
-target_link_libraries(pyreceiver PUBLIC neumoreceiver )
+target_link_libraries(pyreceiver PUBLIC neumoreceiver)
 
 target_link_options(pyreceiver PUBLIC -lgtk-3)
 
-install (TARGETS pyreceiver pyspectrum DESTINATION ${Python_SITEARCH}/${PROJECT_NAME})
+install (TARGETS pyreceiver pyspectrum DESTINATION ${Python_STDLIB}/${PROJECT_NAME})

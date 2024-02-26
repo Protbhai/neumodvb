@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -20,7 +20,8 @@
 
 
 #pragma once
-
+#include "../util/template_util.h"
+#include "../util/dtassert.h"
 using namespace ss;
 
 inline int next_power_of_two(int n) {
@@ -51,30 +52,33 @@ inline int next_power_of_two(int n) {
 
 
 	template<typename data_t>
-	data_t& databuffer_<data_t>::operator[] (int pos)
+	INLINE data_t& databuffer_<data_t>::operator[] (int pos)
 	{
+		auto s = size();
 		if(pos<0)
-			pos = size() +pos;
-		if(pos<0)
+			pos = s +pos;
+		if(pos < 0)
 			throw std::runtime_error("Index out of range");
-		if(pos >= capacity()) {
-			reserve(pos + 1 );
-		  //throw std::out_of_range("index out of range");
-		}
+		reserve(pos + 1 );
+
 		auto* b =buffer();
-		if(pos >= size()) {
-			for(int i=size(); i<= pos; ++i)
-				new(b+i) data_t();
+		if(pos >= s) {
+			if constexpr (std::is_trivial<data_t>::value) {
+				memset(b+size(), 0, pos - s +1);
+			} else {
+				for(int i=size(); i<= pos; ++i)
+					new(b+i) data_t();
+			}
 			set_size(pos + 1);
 		}
+#ifdef SS_ASSERT
 		assert(pos < capacity());
+#endif
 		return b[pos];
 	}
 
-
-
 	template<typename data_t>
-	const data_t& databuffer_<data_t>::operator[] (int pos) const
+	INLINE const data_t& databuffer_<data_t>::operator[] (int pos) const
 	{
 		if(pos<0)
 			pos = size() +pos;
@@ -88,17 +92,18 @@ inline int next_power_of_two(int n) {
 
 
 	template<typename data_t>
-	void databuffer_<data_t>::reserve(int newsize)
+	inline void databuffer_<data_t>::reserve(int newsize)
 	{
-		if(is_view())
-			return;
 		auto newcap = newsize;
-		if (newcap <=capacity())
+		if (newcap <= capacity())
+			return;
+
+		if(is_view())
 			return;
 
 		auto old_length = size();
 		newcap = next_power_of_two(newcap);
-		if(newcap - old_length <= 16)
+		if(newcap - old_length <= 32)
 			newcap *= 2;
 		if(newcap==0)
 			newcap++;
@@ -110,10 +115,12 @@ inline int next_power_of_two(int n) {
 		auto* p  = (D1*) operator new (s);
 		auto* old_data = buffer();
 		p->capacity_ = newcap;
-		for(int i=0; i< old_length; ++i) {
-			new(p->data()+i) data_t(old_data[i]);
-		}
-		if(!std::is_trivial<data_t>::value) {
+		if constexpr (std::is_trivial<data_t>::value) {
+			memcpy(p->data(), old_data, old_length*sizeof(data_t));
+		} else {
+			for(int i=0; i< old_length; ++i) {
+				new(p->data()+i) data_t(old_data[i]);
+			}
 			for(int i=0; i< old_length; ++i)
 				old_data[i].~data_t();
 		}
@@ -130,12 +137,7 @@ inline int next_power_of_two(int n) {
 		set_size(old_length);
 	}
 
-	template<typename data_t>
-	void databuffer_<data_t>::grow(int extra) {
-		reserve(capacity() + extra);
-	}
-
-	template<typename data_t>
+template<typename data_t>
 	databuffer_<data_t>::~databuffer_() {
 		if(is_allocated()) {
 			assert(!is_view());
@@ -155,21 +157,30 @@ inline int next_power_of_two(int n) {
 		reserve(v_len);
 
 		auto* dest = buffer();
+		if constexpr (std::is_trivial<data_t>::value) {
+			memcpy(dest, v, v_len*sizeof(data_t));
+		} else {
 		for(int i=0; i< v_len; ++i)
 			dest[i] = (const data_t&) v[i];
+		}
 		set_size(v_len);
 	};
 
 	template<typename data_t>
 	void databuffer_<data_t>::copy(const databuffer_&x)
 	{
+#ifdef SS_ASSERT
 		assert(header.h.inited);
+#endif
 		if(this== &x)
 			return;
-		clear();
+		if constexpr (std::is_trivial<data_t>::value) {
+			copy_raw(x.buffer(), x.size());
+		} else {
+			clear();
 		for (auto&xx: x)
 			push_back(xx);
-
+		}
 	};
 
 

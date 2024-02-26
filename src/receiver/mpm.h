@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -64,6 +64,7 @@ struct mpm_copylist_t {
 	fs::path dst_dir;
 	//ss::vector<ss::string<128>, 32> filenames;
 	recdb::rec_t rec;
+	int fileno_offset{0};
 	mpm_copylist_t() = default;
 	mpm_copylist_t(const fs::path& src_dir_, const fs::path& dst_dir_, const recdb::rec_t& rec_)
 		: src_dir(src_dir_)
@@ -91,11 +92,6 @@ public:
 
 
 	void open_index();
-
-	/*!
-		wait until a transaction has been written to idxdb with tnxid > > old_txn_id
-	*/
-	int wait_for_data(int old_txn_id) ;
 
 };
 
@@ -125,9 +121,6 @@ public:
 	std::vector<playback_mpm_t*> playback_clients; /*for an active_mpm_t: filenos currently being played back
 																									by any passive mpms coupled to it
 																								*/
-	system_time_t last_epg_update_time{};
-	recdb::live_service_t livebuffer_desc{};
-
 	meta_marker_t() {
 		//needed to distinguish an uninitialized record from one with start==0
 		assert(current_marker.packetno_start == std::numeric_limits<uint32_t>::max());
@@ -135,10 +128,7 @@ public:
 	}
 	meta_marker_t(meta_marker_t&& other) = delete;
 	void init(system_time_t now);
-	void update_epg(const epgdb::epg_record_t& epg);
 	bool need_epg_update(system_time_t play_time) const;
-	epgdb::epg_record_t get_current_epg() const;
-
 	void register_playback_client(playback_mpm_t* client);
 	void unregister_playback_client(playback_mpm_t* client);
 	int playback_clients_newest_fileno() const;
@@ -250,21 +240,17 @@ class playback_mpm_t : public mpm_t {
 public:
 	const subscription_id_t subscription_id;
 
-	active_service_t* active_service () const;
-
-
 private:
 	void find_current_pmts(int64_t bytepos);
 	int get_end_marker_from_db(db_txn& txn, recdb::marker_t& end_marker);
-	int get_marker_for_time_from_db(db_txn& txn, recdb::marker_t& current_marker, milliseconds_t start_play_time);
+	int get_marker_for_time_from_db(db_txn& idxdb_txn, recdb::marker_t& current_marker, milliseconds_t start_play_time);
 
 	//int refresh_markers_(db_txn& txn);
 	//int refresh_markers_(db_txn& txn, milliseconds_t milliseconds);
 	//int refresh_current_file_record_(db_txn& txn);
-	int open_(db_txn& txn, milliseconds_t start_time);
+	int open_(db_txn& idxdb_txn, milliseconds_t start_time);
 
-
-	int open_file_containing_time(db_txn& txn, milliseconds_t start_time);
+	int open_file_containing_time(db_txn& recdb_txn, milliseconds_t start_time);
 
 	int open_next_file();
 	int64_t copy_filtered_packets(char* outbuffer, uint8_t* inbuffer, int64_t numbytes);
@@ -276,13 +262,14 @@ private:
 	playback_info_t get_recording_program_info() const;
 	void update_pmt(stream_state_t& stream_state);
 public:
-	void register_audio_changed_callback(subscription_id_t subscription_id, stream_state_t::callback_t cb);
-	void unregister_audio_changed_callback(subscription_id_t subscription_id);
+	EXPORT active_service_t* active_service () const;
+	EXPORT void register_audio_changed_callback(subscription_id_t subscription_id, stream_state_t::callback_t cb);
+	EXPORT void unregister_audio_changed_callback(subscription_id_t subscription_id);
 
-	void register_subtitle_changed_callback(subscription_id_t subscription_id, stream_state_t::callback_t cb);
-	void unregister_subtitle_changed_callback(subscription_id_t subscription_id);
+	EXPORT void register_subtitle_changed_callback(subscription_id_t subscription_id, stream_state_t::callback_t cb);
+	EXPORT void unregister_subtitle_changed_callback(subscription_id_t subscription_id);
 
-	void open_recording(const char* dirname);
+	EXPORT void open_recording(const char* dirname);
 	//void init();
 
 
@@ -292,28 +279,28 @@ public:
 	playback_mpm_t& operator=(const playback_mpm_t& other) = delete;
 
 
-	int64_t read_data(char* buffer, uint64_t numbytes);
-	int move_to_time(milliseconds_t start_play_time);
-	int move_to_live();
+	EXPORT int64_t read_data(char* buffer, uint64_t numbytes);
+	EXPORT int move_to_time(milliseconds_t start_play_time);
+	EXPORT int move_to_live();
 	//int open(int fileno=0); //find and open file
-	void close();
-	milliseconds_t get_current_play_time() const;
-	void force_abort();
+	EXPORT void close();
+	EXPORT milliseconds_t get_current_play_time() const;
+	EXPORT void force_abort();
 	int current_fileno() const {
 		return currently_playing_file.readAccess()->fileno;
 	}
-	playback_info_t get_current_program_info() const;
-	int set_language_pref(int idx, bool for_subtitles);
+	EXPORT playback_info_t get_current_program_info() const;
+	EXPORT int set_language_pref(int idx, bool for_subtitles);
 	inline int set_audio_language(int audio_idx) {
 		return set_language_pref(audio_idx, false);
 	}
 	inline int set_subtitle_language(int subtitle_idx) {
 		return set_language_pref(subtitle_idx, true);
 	}
-	chdb::language_code_t get_current_audio_language();
-	chdb::language_code_t get_current_subtitle_language();
-	ss::vector_<chdb::language_code_t> audio_languages();
-	ss::vector_<chdb::language_code_t> subtitle_languages();
+	EXPORT chdb::language_code_t get_current_audio_language();
+	EXPORT chdb::language_code_t get_current_subtitle_language();
+	EXPORT ss::vector_<chdb::language_code_t> audio_languages();
+	EXPORT ss::vector_<chdb::language_code_t> subtitle_languages();
 
 };
 
@@ -357,8 +344,6 @@ public:
 private:
 	bool  file_used_by_recording(const recdb::file_t& file) const;
 	static ss::string<128> make_dirname(active_service_t*parent, system_time_t start_time);
-
-	void update_epg_if_needed(meta_marker_t* mm);
 	bool next_key(int parity);
 	void transfer_filemap(int fd, int64_t new_num_bytes_safe_to_read); //helper
 
@@ -398,7 +383,7 @@ private:
 	start_recording(subscription_id_t subscription_id, recdb::rec_t rec /*not a reference!*/);
 
 	int stop_recording(const recdb::rec_t& rec_in, mpm_copylist_t& copy_command);
-	void forget_recording(const recdb::rec_t& r);
+	void forget_recording_in_livebuffer(const recdb::rec_t& r);
 
 	void delete_recording(db_txn& parent_txn, uint32_t event_id, system_time_t now);
 	void update_recording(recdb::rec_t&rec, const chdb::service_t& service,
@@ -410,5 +395,5 @@ private:
 	void destroy();
 };
 
-int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db);
+int finalize_recording(db_txn& livebuffer_idxdb_rtxn, mpm_copylist_t& copy_command, mpm_index_t* db);
 int close_last_mpm_part(db_txn& idx_txn, const ss::string_& dirname);

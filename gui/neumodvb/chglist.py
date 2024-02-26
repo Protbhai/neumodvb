@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -54,7 +54,7 @@ class ChgTable(NeumoTable):
         screen_getter = lambda txn, subfield: self.screen_getter_xxx(txn, subfield)
 
         super().__init__(*args, parent=parent, basic=basic, db_t=pychdb, data_table = data_table,
-                          screen_getter = screen_getter,
+                         screen_getter = screen_getter,
                          record_t=pychdb.chg.chg, initial_sorted_column = initial_sorted_column,
                          **kwds)
 
@@ -102,9 +102,11 @@ class ChgGridBase(NeumoGridBase):
                                   f'Turn off Bouquet Edit Mode?\n', default_is_ok=True)
             if not ok:
                 return ok #uncheck menu item
+            wx.GetApp().get_menu_item('BouquetAddService').disabled = True
             dtdebug('EditBouquetMode turned OFF')
             self.app.frame.bouquet_being_edited = None
             self.app.frame.current_panel().grid.table.OnModified()
+            self.app.frame.CmdChgList(None)
             return True
 
         row = self.GetGridCursorRow()
@@ -120,6 +122,8 @@ class ChgGridBase(NeumoGridBase):
                               default_is_ok=True)
             if not ok:
                 return ok #uncheck menu item
+            self.app.get_menu_item('BouquetAddService').disabled = False
+            self.app.frame.CmdServiceList(None)
         self.app.frame.bouquet_being_edited = record
         return True
 

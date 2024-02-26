@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -22,7 +22,6 @@
 #include "stackstring.h"
 #include "active_stream.h"
 #include "receiver.h"
-#include "reservation.h"
 #include "mpm.h"
 #include <functional>
 
@@ -44,7 +43,6 @@ class active_service_t final : public std::enable_shared_from_this<active_servic
 	friend class service_thread_t;
 	friend class open_channel_parser_t;
 	friend class active_mpm_t;
-
 	mutable std::mutex mutex;
 	//the following fields can be modified and should not be accessed/modified without locikng a mutex
 	chdb::service_t current_service; //current channel
@@ -79,8 +77,6 @@ class active_service_t final : public std::enable_shared_from_this<active_servic
 	}
 
 	playback_info_t get_current_program_info() const;
-
-	thread_private_t<service_reservation_t> reservation{"service"};
 	service_thread_t service_thread;
 private:
 	int channel_status=0; //composed of bitflags channel_status_t
@@ -95,7 +91,7 @@ private:
 
 	active_mpm_t mpm;
 	periodic_t periodic;
-
+	void destroy();
 	int create_recording_in_filesystem(const recdb::rec_t& rec);
 	void update_audio_languages(const pmt_info_t& pmt);
 	void update_subtitle_languages(const pmt_info_t& pmt);
@@ -104,26 +100,20 @@ private:
 	int deactivate();
 	//int run();
 	void update_pmt(const pmt_info_t& pmt, bool isnext, const ss::bytebuffer_& sec_data);
-
-	void on_epg_update(system_time_t now, const epgdb::epg_record_t& epg_record);
 	void save_pmt(system_time_t now, const pmt_info_t& pmt_info);
  public:
-	void update_epg_(db_txn& parent_txn, const system_time_t now, meta_marker_t* mm);
-	void update_epg(const system_time_t now, meta_marker_t* mm = nullptr);
 
 	int open();
 	void close();
 
 		//void process_psi(int pid, unsigned char* payload, int payload_size);
-	active_service_t(active_adapter_t& active_adapter, const std::shared_ptr<stream_reader_t>& reader);
-
-	active_service_t(active_adapter_t& active_adapter, const chdb::service_t& ch,
+	active_service_t(receiver_t& receiver, active_adapter_t& active_adapter,
 									 const std::shared_ptr<stream_reader_t>& reader);
 
-	virtual ~active_service_t() final {
-		dtdebug("destructor\n");
-	}
+	active_service_t(receiver_t& receiver, active_adapter_t& active_adapter,
+									 const chdb::service_t& ch, const std::shared_ptr<stream_reader_t>& reader);
 
+	~active_service_t() final;
 
 	virtual  ss::string<32> name() const;
 	void housekeeping(system_time_t now); //periodically called to remove old data in timeshift buffer
@@ -134,10 +124,11 @@ private:
 		return mpm.creation_time;
 	}
 
-	recdb::live_service_t get_live_service() const;
-	recdb::live_service_t get_live_service_key() const;
+	recdb::live_service_t get_live_service(subscription_id_t subscription_id) const;
 	std::unique_ptr<playback_mpm_t> make_client_mpm(subscription_id_t subscription_id);
 
 	bool need_decryption();
 
+	std::optional<recdb::rec_t>
+	start_recording(subscription_id_t subscription_id, const recdb::rec_t& rec);
 };

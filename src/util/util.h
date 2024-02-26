@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -31,13 +31,23 @@
 #include <sys/timerfd.h>
 #include "stackstring.h"
 
+#ifndef HIDDEN
+#define HIDDEN __attribute__((visibility("hidden")))
+#endif
+#ifndef EXPORT
+#define EXPORT __attribute__((visibility("default")))
+#endif
+
+
+
 extern "C" {
 off_t filesize_fd(int fd);
 }
 
 extern std::filesystem::path config_path;
 
-int timer_start(double period_sec=2.0);
+int periodic_timer_create_and_start(double period_sec=2.0);
+int timer_set_once(int fd, double expiration_sec);
 int timer_stop(int fd);
 int timer_set_period(int fd, double period_sec);
 
@@ -187,7 +197,7 @@ extern int _slowdown(time_t*last,int *count, time_t now, int maxcount);
 		static time_t last=0;																								\
 		static int count=0;																									\
 		if(_slowdown(&last, &count, now, maxcount)){												\
-			dtdebugx("SLOW %s: Too many calls: %d/s (%d in %d s)\n",					\
+			dtdebugf("SLOW {}: Too many calls: {:d}/s ({:d} in {:d} s)\n",					\
 							 msg,(int)(count/(now-last)),count,(int)(now-last));			\
 		}																																		\
 }
@@ -225,3 +235,7 @@ inline void msleep(uint32_t msec) {
 	while (nanosleep(&req, &req))
 		;
 }
+
+#define INLINE 	__attribute__((always_inline)) inline
+#define likely(x)      __builtin_expect(!!(x), 1)
+#define unlikely(x)    __builtin_expect(!!(x), 0)

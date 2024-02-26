@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -43,9 +43,13 @@ namespace {{dbname}} {
 	template<typename record_t>
 		EXPORT bool put_record(db_tcursor<record_t>& tcursor, const record_t& record, unsigned int put_flags=0);
 
-
+	{% if false %}
 	template<typename record_t>
 		EXPORT void put_record_at_key(db_tcursor<record_t>& tcursor, const ss::bytebuffer_& primary_key, const record_t& record);
+	{% endif %}
+
+	template<typename record_t>
+		EXPORT void update_record_at_cursor(db_tcursor<record_t>& tcursor, const record_t& record);
 
 	template<typename record_t>
 		EXPORT bool get_record_at_key(db_tcursor<record_t>& tcursor, const ss::bytebuffer_& primary_key, record_t& ret);

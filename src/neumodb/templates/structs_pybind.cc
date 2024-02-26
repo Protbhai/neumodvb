@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -25,6 +25,22 @@ namespace py = pybind11;
 
 #include "neumodb/{{dbname}}/{{dbname}}_db.h"
 #include "neumodb/{{dbname}}/{{dbname}}_extra.h"
+
+#ifndef ISF_INCLUDED
+#define ISF_INCLUDED
+//helper function to provide standard repr for all undefined structs
+template<typename T>
+inline std::string repr(const T&self, const char*name)
+{
+	if constexpr (fmt::is_formattable<T>::value) {
+		static_assert(fmt::is_formattable<T>::value);
+		return fmt::format("{}", self);
+	} else {
+		return fmt::format("{}[{:p}]", (void*)&self, name);
+	}
+}
+
+#endif
 
 
 namespace {{dbname}} {
@@ -52,7 +68,7 @@ namespace {{dbname}} {
 		.def("has_same_key", &{{struct.class_name}}::has_same_key)
 		{% endif %}
 		.def("copy", [](const {{struct.class_name}}& self){ return self;})
-    .def("__repr__", [](const {{struct.class_name}}& self){ auto x = to_str(self); return std::string(x.c_str());})
+    .def("__repr__", [](const {{struct.class_name}}& self){ return repr(self, "{{struct.class_name}}");})
     {%for f in struct.fields %}
 		{%if f.is_string %}
 		.def_property("{{f.name}}",
@@ -81,10 +97,26 @@ namespace {{dbname}} {
 									[](const {{struct.class_name}}&x) {
 										return &(ss::vector_<{{f.scalar_type}}>&) x.{{f.name}};
 									},
-									[]( {{struct.class_name}}&x, const ss::vector_<{{f.scalar_type}}> val)
-										{ x.{{f.name}} = val;})
-			              //{ x.{{f.name}} = {{f.type}}(&val[0], val.size()); })
-
+									[]( {{struct.class_name}}&x, py::object o)
+										{
+											if(py::isinstance<py::list>(o)) {
+												auto& v= (ss::vector_<{{f.scalar_type}}>&) x.{{f.name}};
+												v.clear();
+												auto l = py::cast<py::list>(o);
+												for(auto p: l)  {
+													if constexpr
+														(!pybind11::detail::cast_is_temporary_value_reference<{{f.scalar_type}}>::value) {
+														auto pv =  p.cast<{{f.scalar_type}}>();
+														v.push_back(pv);
+													} else {
+														auto pv =  p.cast<{{f.scalar_type}}&>();
+														v.push_back(pv);
+													}
+												}
+											} 	else {
+												auto& val = py::cast<ss::vector_<{{f.scalar_type}}>&>(o);
+												x.{{f.name}} = val;
+											}})
 		{%else%}
 		.def_readwrite("{{f.name}}", &{{struct.class_name}}::{{f.name}})
 		{%endif%}

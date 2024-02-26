@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -58,13 +58,6 @@
 #include "filemapper.h"
 #include "streamparser/packetstream.h"
 
-#include "date/date.h"
-#include "date/tz.h"
-#include "date/iso_week.h"
-using namespace date;
-using namespace date::clock_cast_detail;
-
-
 using std::placeholders::_1;
 using std::placeholders::_2;
 using std::placeholders::_3;
@@ -84,7 +77,7 @@ devdb::lnb_key_t active_stream_t::get_adapter_lnb_key() const {
 ss::string<32> active_stream_t::name() const
 {
 	ss::string<32> ret;
-	ret.sprintf("stream[%d]-%p: ", get_adapter_no(), this);
+	ret.format("stream[{:d}]-{:p}: ", get_adapter_no(), fmt::ptr(this));
 	return ret;
 }
 
@@ -101,21 +94,21 @@ int dvb_stream_reader_t::open(uint16_t initial_pid, epoll_t* epoll, int epoll_fl
 	this->epoll = epoll;
 	this->epoll_flags = epoll_flags;
 	if(demux_fd>=0) {
-		dterror("Implementation error: multiple opens");
+		dterrorf("Implementation error: multiple opens");
 		return demux_fd;
 	}
 
 	demux_fd = active_adapter.open_demux();
 	if(demux_fd<0) {
-		dterror("Cannot open demux: " << strerror(errno));
+		dterrorf("Cannot open demux: {}", strerror(errno));
 		return demux_fd;
 	}
-	dtdebug("OPEN DEMUX_FD="  << demux_fd);
+	dtdebugf("OPEN DEMUX_FD={}", demux_fd);
 
 	epoll->add_fd(demux_fd, epoll_flags);
 
 	uint16_t pid= initial_pid;
-	dtdebug("Adding pid=" << pid);
+	dtdebugf("Adding pid={}", pid);
 	struct dmx_pes_filter_params pesFilterParams;
 	memset(&pesFilterParams,0,sizeof(pesFilterParams));
 	pesFilterParams.pid = pid;
@@ -124,14 +117,14 @@ int dvb_stream_reader_t::open(uint16_t initial_pid, epoll_t* epoll, int epoll_fl
 	pesFilterParams.pes_type = DMX_PES_OTHER;
 	pesFilterParams.flags = 0; //DMX_IMMEDIATE_START;
 	if(ioctl(demux_fd, DMX_SET_BUFFER_SIZE, dmx_buffer_size)) {
-		dterror("DMX_SET_BUFFER_SIZE failed: " << strerror(errno));
+		dterrorf("DMX_SET_BUFFER_SIZE failed: {}", strerror(errno));
 	}
 	if (ioctl(demux_fd, DMX_SET_PES_FILTER, &pesFilterParams) < 0) {
-		dterror("DMX_SET_PES_FILTER  pid=" << pid << " failed: " << strerror(errno));
+		dterrorf("DMX_SET_PES_FILTER  pid={} failed: {}", pid, strerror(errno));
 		return -1;
 	}
 	if(ioctl (demux_fd, DMX_START)<0) {
-		dterror("DMX_START FAILED: " << strerror(errno));
+		dterrorf("DMX_START FAILED: {}", strerror(errno));
 	}
 
 	return demux_fd;
@@ -150,20 +143,17 @@ int active_stream_t::open(uint16_t initial_pid, epoll_t* epoll, int epoll_flags)
 	return -1;
 }
 
-
-
-
 void dvb_stream_reader_t::close() {
 	if(demux_fd<0) {
 
 		return;
 	}
-	dtdebugx("closing demux_fd=%d", demux_fd);
+	dtdebugf("closing demux_fd={:d}", demux_fd);
 	epoll->remove_fd(demux_fd);
 	if(::close(demux_fd)<0) {
-		dterror("Cannot close demux: " << strerror(errno));
+		dterrorf("Cannot close demux: {}", strerror(errno));
 	} else {
-		dtdebugx("Closed demux_fd");
+		dtdebugf("Closed demux_fd");
 	}
 	demux_fd = -1;
 }
@@ -182,7 +172,7 @@ void active_stream_t::close() {
 	 Pid will be received as a transport stream on a single file descriptor shared with other pids
 
 	 @param pid the pid for the filter
-	 Output is sent to /dev/dvb/adapter%d/demux%d
+	 Output is sent to /dev/dvb/adapter{:d}/demux{:d}
 	 Returns 0 or -1
 */
 int active_stream_t::add_pid(uint16_t pid)
@@ -196,14 +186,14 @@ int active_stream_t::add_pid(uint16_t pid)
 		if(x.pid == pid) {
 			assert(x.use_count>0);
 			x.use_count++;
-			dtdebug("registering duplicate pid=" << pid);
+			dtdebugf("registering duplicate pid={}", pid);
 			return 0;
 		}
 	}
-	dtdebug("Adding pid=" << pid << " to channel transport stream");
+	dtdebugf("Adding pid={} to channel transport stream", pid);
 	open_pids.push_back(pid_with_use_count_t(pid));
 	if(reader->add_pid(pid)<0) {
-		dterror("DMX_ADD_PID " << pid << " FAILED: " << strerror(errno));
+		dterrorf("DMX_ADD_PID {} FAILED: {}", pid, strerror(errno));
 		return -1;
 	}
 
@@ -219,7 +209,7 @@ void active_stream_t::remove_pid(uint16_t pid)
 	if(pid==0x1fff)
 		return;
 	if(!reader->is_open()) {
-		dterror("remove_pid with demux_fd<0");
+		dterrorf("remove_pid with demux_fd<0");
 		return;
 	}
 
@@ -228,9 +218,9 @@ void active_stream_t::remove_pid(uint16_t pid)
 			assert(x.use_count >0);
 			if(--x.use_count == 0) {
 				if(reader->remove_pid(pid)<0) {
-					dterror("DMX_REMOVE_PID " << pid << " FAILED: " << strerror(errno));
+					dterrorf("DMX_REMOVE_PID {} FAILED: {}", pid, strerror(errno));
 				} else {
-					dtdebug("DMX_REMOVE_PID " << pid );
+					dtdebugf("DMX_REMOVE_PID {}", pid );
 				}
 				int idx  = &x - &open_pids[0];
 				open_pids.erase(open_pids.begin() + idx);
@@ -247,14 +237,14 @@ void active_stream_t::remove_all_pids()
 {
 	log4cxx::NDC(name());
 	if(!reader->is_open()) {
-		dterror("remove_pid with reader->demux_fd<0");
+		//dterrorf("remove_pid with reader->demux_fd<0");
 		return;
 	}
 
 	for(auto &x: open_pids) {
 		assert(x.use_count>0);
 		if(reader->remove_pid(x.pid)<0) {
-			dterror("DMX_REMOVE_PID " << x.pid << " FAILED: " << strerror(errno));
+			dterrorf("DMX_REMOVE_PID {} FAILED: {}", x.pid, strerror(errno));
 		}
 	}
 	open_pids.clear();
@@ -275,7 +265,7 @@ chdb::any_mux_t dvb_stream_reader_t::stream_mux() const {
 	assert((chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::ACTIVE &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::PENDING &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::RETRY) ||
-				 chdb::mux_common_ptr(mux)->scan_id >0);
+				 chdb::scan_in_progress(chdb::mux_common_ptr(mux)->scan_id));
 
 	return active_adapter.current_tp();
 }
@@ -294,7 +284,7 @@ void dvb_stream_reader_t::set_current_tp(const chdb::any_mux_t& mux) const
 	active_adapter.set_current_tp(mux);
 }
 
-const tune_options_t& stream_reader_t::tune_options() const
+const subscription_options_t& stream_reader_t::tune_options() const
 {
 	auto& tune_options = active_adapter.fe->ts.readAccess()->tune_options;
 	return tune_options;
@@ -322,26 +312,25 @@ void  stream_reader_t::update_stream_mux_tune_confirmation(const tune_confirmati
 void dvb_stream_reader_t::update_stream_mux_nit(const chdb::any_mux_t& stream_mux)
 {
 	//for active_adapter stream_mux == tuned_mux
-	active_adapter.fe->update_tuned_mux_nit(stream_mux);
-
+	active_adapter.update_tuned_mux_nit(stream_mux);
 }
 
 
 
 int dvb_stream_reader_t::add_pid(int pid) {
 	if(ioctl (demux_fd, DMX_ADD_PID, &pid)<0) {
-		dterror("DMX_ADD_PID " << pid << " FAILED: " << strerror(errno));
+		dterrorf("DMX_ADD_PID {} FAILED: ", pid, strerror(errno));
 		return -1;
 	}
-		return 0;
+	return 0;
 }
 
 
 int dvb_stream_reader_t::remove_pid(int pid) {
 	if(ioctl (demux_fd, DMX_REMOVE_PID, &pid)<0) {
-		dterror("DMX_REMOVE_PID " << pid << " FAILED: " << strerror(errno));
+		dterrorf("DMX_REMOVE_PID {} FAILED: {}", pid, strerror(errno));
 		return -1;
 	} else
-		dtdebug("DMX_REMOVE_PID " << pid );
+		dtdebugf("DMX_REMOVE_PID {}",  pid);
 	return 0;
 }

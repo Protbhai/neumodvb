@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -44,7 +44,7 @@
    If not, and EXPRESSION is zero, print an error message and abort.  */
 
 #ifdef	NDEBUG
-
+#undef assert
 # define assert(expr)		(__DTASSERT_VOID_CAST (0))
 
 /* void dtassert_perror (int errnum);
@@ -54,6 +54,7 @@
    (This is a GNU extension.) */
 
 # ifdef	__USE_GNU
+#undef assert_perror
 #  define assert_perror(errnum)	(__DTASSERT_VOID_CAST (0))
 # endif
 

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -48,7 +48,7 @@ def has_network(lnb, sat_pos):
 def must_move_dish(lnb, sat_pos):
     if lnb is None:
         return False
-    return pydevdb.lnb.on_positioner(lnb) and abs(sat_pos - lnb.usals_pos) >= 30
+    return lnb.on_positioner and abs(sat_pos - lnb.usals_pos) >= 30
 
 def has_network_with_usals(lnb, usals_pos):
     for n in lnb.networks:
@@ -103,16 +103,17 @@ class LnbTable(NeumoTable):
                       label='LNB', basic=True, readonly=True)
                               ]
     all_columns = \
-        [#CD(key='connection_name',  label='LNB', basic=True, readonly=True,
-         #   example=" C2#0 23.5EKu 1212  ", dfn=lnb_key_fn),
-         CD(key='k.dish_id',  label='dish', basic=True, readonly=False),
+        [CD(key='k.dish_id',  label='dish', basic=True, readonly=False),
             #following must be readonly, or change may be accidentally undone by positioner dialog
          CD(key='on_positioner',  label='on\nrotor', basic=True, readonly=False),
             #following must be readonly, or change may be accidentally undone by positioner dialog
-         CD(key='cur_sat_pos',  label='cur sat\npos', basic=True, readonly=True, no_combo = True, #allow entering sat_pos
-            dfn= lambda x: x[2].cur_sat_pos_fn(x[0])),
+         CD(key='lnb_usals_pos',  label='lnb\nusals', basic=True, readonly=True, no_combo = True,
+            dfn= lambda x: pychdb.sat_pos_str(x[1])),
             #following must be readonly, or change may be accidentally undone by positioner dialog
-         CD(key='usals_pos',  label='usals\npos', basic=True, readonly=True, no_combo = True,
+         CD(key='cur_sat_pos',  label='cur sat\npos', basic=True, readonly=True, no_combo = True,
+            dfn= lambda x: pychdb.sat_pos_str(x[1])),
+            #following must be readonly, or change may be accidentally undone by positioner dialog
+         CD(key='usals_pos',  label='dish\nusals', basic=True, readonly=True, no_combo = True,
             dfn= lambda x: pychdb.sat_pos_str(x[1])),
             #following must be readonly, or change may be accidentally undone by positioner dialog
          CD(key='offset_angle',  label='offset\nangle', basic=True, readonly=True, no_combo = True,
@@ -134,18 +135,6 @@ class LnbTable(NeumoTable):
          CD(key='lof_high',   label='LOF\nhigh', basic=False, dfn=freq_fn, example="10700.000"),
         ]
 
-    dvbt_columns =  \
-        [CD(key='LP_code_rate', label='LP_code_rate'),
-         CD(key='bandwidth', label='bandwidth'),
-         CD(key='guard_interval', label='guard_interval'),
-         CD(key='hierarchy', label='hierarchy'),
-         CD(key='rolloff', label='rolloff'),
-         CD(key='transmission_mode', label='transmission_mode')]
-
-    def cur_sat_pos_fn(self, lnb):
-        sat_pos = lnb.usals_pos if lnb.cur_sat_pos == pychdb.sat.sat_pos_none else lnb.cur_sat_pos
-        return pychdb.sat_pos_str(sat_pos)
-
     def __init__(self, parent, basic=False, *args, **kwds):
         initial_sorted_column = 'usals_pos'
         data_table= pydevdb.lnb
@@ -163,7 +152,7 @@ class LnbTable(NeumoTable):
     def screen_getter_xxx(self, txn, sort_field):
         match_data, matchers = self.get_filter_()
         screen = pydevdb.lnb.screen(txn, sort_order=sort_field,
-                                   field_matchers=matchers, match_data = match_data)
+                                    field_matchers=matchers, match_data = match_data)
         self.screen = screen_if_t(screen, self.sort_order==2)
 
         if False:
@@ -241,7 +230,8 @@ class LnbGridBase(NeumoGridBase):
 
     def OnShowHide(self, event):
         #Ensure that multiline rows are shown fully
-        wx.CallAfter(self.AutoSizeRows)
+        if event.Show:
+            wx.CallAfter(self.AutoSizeRows)
         return super().OnShowHide(event)
 
     def CheckShowDialog(self, evt, rowno, colno):

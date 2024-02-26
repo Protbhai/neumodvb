@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -34,6 +34,7 @@ from neumodvb.neumolist import NeumoTable, NeumoGridBase, IconRenderer, MyColLab
 
 
 import pychdb
+import pydevdb
 
 class DvbtMuxTable(NeumoTable):
     record_t =  pychdb.dvbt_mux.dvbt_mux
@@ -44,7 +45,7 @@ class DvbtMuxTable(NeumoTable):
     time_fn =  lambda x: datetime.datetime.fromtimestamp(x[1], tz=tz.tzlocal()).strftime("%M:%S")
     epg_types_fn =  lambda x: '; '.join([ lastdot(t) for t in x[1]])
     all_columns = \
-        [CD(key='frequency', label='Frequency', dfn= lambda x: f'{x[1]/1000.:9.3f}', example="10725.114"),
+        [CD(key='frequency', label='Freq.', dfn= lambda x: f'{x[1]/1000.:9.3f}', example="10725.114 "),
          CD(key='delivery_system', label='System', dfn=lambda x: lastdot(x).replace('SYS',"")),
          CD(key='modulation', label='Modulation', dfn=lambda x: lastdot(x)),
          CD(key='bandwidth', label='Bandwidth', dfn=lambda x: lastdot(x).replace('FEC','')),
@@ -61,14 +62,16 @@ class DvbtMuxTable(NeumoTable):
          CD(key='c.num_services', label='#srv'),
          CD(key='c.mtime', label='Modified', dfn=datetime_fn, example='2021-06-16 18:30:33*'),
          CD(key='c.scan_time', label='Scanned', dfn=datetime_fn, example='2021-06-16 18:30:33*', readonly=True),
+         CD(key='c.scan_lock_result', label='lock', dfn=lambda x: lastdot(x)) ,
          CD(key='c.scan_status', label='Scan\nstatus', dfn=lambda x: lastdot(x)),
-         CD(key='c.scan_id', label='Scan\nID', dfn=lambda x: "" if x[1]==0 else str(x[1] &0xff)),
          CD(key='c.scan_result', label='Scan\nresult', dfn=lambda x: lastdot(x)) ,
-         CD(key='c.scan_duration', label='Scan time', dfn=time_fn),
+         CD(key='c.scan_duration', label='Scan\ntime', dfn=time_fn),
+         CD(key='c.epg_scan_completeness', label='EPG \n%'),
          CD(key='c.epg_scan', label='Epg\nscan', dfn=bool_fn),
-         CD(key='c.epg_types', label='Epg\ntypes', dfn=epg_types_fn, example='FST'*2, readonly=True),
+         CD(key='c.epg_types', label='Epg\ntypes', dfn=epg_types_fn, example='MOVIS ', readonly=True),
          CD(key='c.tune_src', label='tun\nsrc', dfn=lambda x: pychdb.tune_src_str(x[1]), readonly=True, example="nita"),
-         CD(key='c.key_src', label='ids\nsrc', dfn=lambda x: pychdb.key_src_str(x[1]), readonly=True, example="nita")
+         CD(key='c.key_src', label='ids\nsrc', dfn=lambda x: pychdb.key_src_str(x[1]), readonly=True, example="nita"),
+         #CD(key='c.scan_id', label='Scan\nID', dfn=lambda x: "" if x[1]==0 else str(x[1] & 0xff))
          ]
 
     other_columns =  \
@@ -110,6 +113,14 @@ class DvbtMuxTable(NeumoTable):
         ret.c.tune_src = pychdb.tune_src_t.TEMPLATE
         return ret
 
+    def highlight_colour(self,mux):
+        e = wx.GetApp().frame.command_being_edited
+        if e is None:
+            return None
+
+        ret = e.dvbt_muxes.index(mux)!=-1
+        return self.parent.default_highlight_colour if ret else None
+
 class DvbtMuxGrid(NeumoGridBase):
 
     def __init__(self, *args, **kwds):
@@ -139,7 +150,6 @@ class DvbtMuxGrid(NeumoGridBase):
         else:
             evt.Skip(True)
 
-
     def CmdTune(self, evt):
         self.table.SaveModified()
         row = self.GetGridCursorRow()
@@ -148,16 +158,92 @@ class DvbtMuxGrid(NeumoGridBase):
         dtdebug(f'CmdTune requested for row={row}: PLAY mux={mux_name}')
         self.app.MuxTune(mux)
 
-    def CmdScan(self, evt):
+    def CmdCreateScanHelper(self, with_schedule):
+        from neumodvb.scan_dialog import show_scan_dialog
         self.table.SaveModified()
-        row = self.GetGridCursorRow()
-        mux = self.table.screen.record_at_row(row)
         rows = self.GetSelectedRows()
-        dtdebug(f'CmdScan requested for {len(rows)} muxes')
+        if len(rows)==0:
+            ShowMessage("No muxes selected for scan")
+            return None
         muxes = []
         for row in rows:
             mux = self.table.GetRow(row)
             muxes.append(mux)
-        self.app.MuxScan(muxes)
+        title =  ', '.join([str(mux) for mux in muxes[:3]])
+        if len(muxes) >=3:
+            title += '...'
+
+        return show_scan_dialog(self, with_schedule = with_schedule, allow_band_scan=False,
+                                title=f'Scan {len(muxes)} muxes', dvbt_muxes=muxes)
+
+    def CmdScan(self, evt):
+        scan_command=self.CmdCreateScanHelper(with_schedule=False)
+        muxes, subscription_type = (None, None) if scan_command is None else \
+            (scan_command.dvbt_muxes, scan_command.tune_options.subscription_type)
+        assert subscription_type ==  pydevdb.subscription_type_t.MUX_SCAN
+        if scan_command is None or muxes is None:
+            dtdebug(f'CmdScan aborted for {0 if muxes is None else len(muxes)} muxes')
+            return
+        dtdebug(f'CmdScan requested for {len(muxes)} muxes')
+        self.app.MuxScan(muxes, scan_command.tune_options)
+
+    def CmdCreateScanCommand(self, evt):
+        scan_command=self.CmdCreateScanHelper(with_schedule=True)
+        muxes, subscription_type = (None, None) if scan_command is None else \
+            (scan_command.dvbt_muxes, scan_command.tune_options.subscription_type)
+        assert subscription_type ==  pydevdb.subscription_type_t.MUX_SCAN
+        if scan_command is None or muxes is None:
+            dtdebug(f'CmdScan aborted for {0 if muxes is None else len(muxes)} muxes')
+            return
+        dtdebug(f'CmdScan requested for {len(muxes)} muxes')
+
+        wtxn =  wx.GetApp().devdb.wtxn()
+        pydevdb.scan_command.make_unique_if_template(wtxn, scan_command)
+        scan_command.mtime = int(datetime.datetime.now(tz=tz.tzlocal()).timestamp())
+        pydevdb.put_record(wtxn, scan_command)
+        wtxn.commit()
+
+    def CmdCommandAddMux(self, evt):
+        rows = self.GetSelectedRows()
+        muxes = [ self.table.screen.record_at_row(row) for row in rows]
+        if self.app.frame.command_being_edited is None:
+            dtdebug(f'request to add mux {muxes} to command={self.app.frame.command_being_edited} IGNORED')
+            return
+        else:
+            dtdebug(f'request to add mux {muxes} to {self.app.frame.command_being_edited}')
+        command = self.app.frame.command_being_edited
+        assert command is not None
+        for mux in muxes:
+            idx = command.dvbt_muxes.index(mux)
+            if idx <0:
+                command.dvbt_muxes.push_back(mux)
+            else:
+                command.dvbt_muxes.erase(idx)
+        wtxn = wx.GetApp().devdb.wtxn()
+        pydevdb.put_record(wtxn, command)
+        wtxn.commit()
+        self.table.OnModified()
+
+    def CmdCreateStreamHelper(self):
+        from neumodvb.stream_dialog import show_stream_dialog
+        self.table.SaveModified()
+        rowno = self.GetGridCursorRow()
+        mux = self.table.GetRow(rowno)
+        return show_stream_dialog(self, title=f'Stream {mux}', dvbt_mux=mux)
+
+    def CmdAddStream(self, evt):
+        stream = self.CmdCreateStreamHelper()
+        if stream is None:
+            dtdebug(f'CmdAddStream aborted')
+            return
+        dtdebug(f'CmdAddStream requested for {stream}')
+        return wx.GetApp().receiver.update_and_toggle_stream(stream)
+
+    @property
+    def CmdEditCommandMode(self):
+        if wx.GetApp().frame.command_being_edited is None:
+            return False #signal to neumomenu that item is disabled
+        return self.app.frame.scancommandgrid.CmdEditCommandMode
+
     def OnTimer(self, evt):
         super().OnTimer(evt)

@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -31,12 +31,16 @@
 namespace devdb {
 	struct lnb_t;
 	struct lnb_network_t;
+	enum class lnb_pol_type_t : int8_t;
 };
 
 namespace chdb {
 	using namespace chdb;
 
-	typedef std::variant<chdb::dvbs_mux_t, chdb::dvbc_mux_t, chdb::dvbt_mux_t> any_mux_t;
+	std::tuple<chdb::sat_band_t, chdb::sat_sub_band_t> sat_band_for_freq(int frequency);
+	std::tuple<int32_t, int32_t> sat_band_freq_bounds(chdb::sat_band_t sat_band, chdb::sat_sub_band_t sub_band);
+
+	using any_mux_t = std::variant<chdb::dvbs_mux_t, chdb::dvbc_mux_t, chdb::dvbt_mux_t>;
 	bool has_epg_type(const chdb::any_mux_t& mux, chdb::epg_type_t epg_type);
 	const mux_key_t* mux_key_ptr(const chdb::any_mux_t& key);
 	const mux_key_t* mux_key_ptr(const chdb::any_mux_t&& key) =delete; //cannot be used with temporaries
@@ -94,20 +98,22 @@ namespace chdb {
 		};
 	};
 
+	using  update_mux_cb_t = std::function<bool(chdb::mux_common_t*, chdb::mux_key_t*,
+		const chdb::mux_common_t*, const chdb::mux_key_t*)>;
 	/*
 		if callback returns false; save is aborted
 		if callback receives nullptr, record was not found
 	*/
 	update_mux_ret_t update_mux(db_txn&txn, chdb::any_mux_t& mux,
-																	system_time_t now, update_mux_preserve_t::flags preserve,
-																	std::function<bool(chdb::mux_common_t*, const chdb::mux_key_t*)> cb,
+															system_time_t now, update_mux_preserve_t::flags preserve, update_mux_cb_t cb,
 																	/*bool ignore_key,*/ bool ignore_t2mi_pid, bool must_exist);
 
 	inline update_mux_ret_t update_mux(db_txn&txn, chdb::any_mux_t& mux,
 																		 system_time_t now, update_mux_preserve_t::flags preserve,
 																		 /*bool ignore_key,*/ bool ignore_t2mi_pid, bool must_exist) {
 		return update_mux(txn, mux, now, preserve,
-											[](chdb::mux_common_t*, const chdb::mux_key_t*) { return true;}, /*ignore_key,*/
+											[](chdb::mux_common_t*, chdb::mux_key_t*,
+												 const chdb::mux_common_t*, const chdb::mux_key_t*) { return true;}, /*ignore_key,*/
 											ignore_t2mi_pid, must_exist);
 	}
 
@@ -128,13 +134,14 @@ namespace chdb {
 	*/
 	template<typename mux_t>
 	update_mux_ret_t update_mux(db_txn& txn, mux_t& mux,  system_time_t now, update_mux_preserve_t::flags preserve,
-															std::function<bool(chdb::mux_common_t*, const chdb::mux_key_t*)> cb,
+															update_mux_cb_t cb,
 															/*bool ignore_key,*/ bool ignore_t2mi_pid, bool must_exist);
 
 	template<typename mux_t>
 	update_mux_ret_t update_mux(db_txn& txn, mux_t& mux,  system_time_t now, update_mux_preserve_t::flags preserve,
 																	/*bool ignore_key,*/ bool ignore_t2mi_pid, bool must_exist) {
-		return update_mux(txn, mux, now, preserve, [](chdb::mux_common_t*, const chdb::mux_key_t*) { return true;},
+		return update_mux(txn, mux, now, preserve, [](chdb::mux_common_t*, chdb::mux_key_t*,
+																									const chdb::mux_common_t*, const chdb::mux_key_t*) { return true;},
 													/*ignore_key,*/ ignore_t2mi_pid, must_exist);
 	}
 
@@ -203,24 +210,19 @@ namespace chdb {
 	chdb::dvbs_mux_t
 	select_reference_mux(db_txn& chdb_rtxn, const devdb::lnb_t& lnb, int16_t sat_pos);
 
+	std::optional<chdb::sat_t>
+	select_sat_for_sat_band(db_txn& chdb_rtxn, const chdb::sat_band_t& sat_band, int sat_pos);
+
+	inline bool scan_in_progress(const chdb::scan_id_t& scan_id) {
+		return scan_id.subscription_id >= 0;
+	}
+
+
+
 };
 
 namespace chdb {
 	using namespace chdb;
-	void to_str(ss::string_& ret, const scan_status_t& scan_status);
-	void to_str(ss::string_& ret, const language_code_t& code);
-	void to_str(ss::string_& ret, const sat_t& sat);
-	void to_str(ss::string_& ret, const mux_key_t& k);
-	void to_str(ss::string_& ret, const dvbs_mux_t& mux);
-	void to_str(ss::string_& ret, const dvbc_mux_t& mux);
-	void to_str(ss::string_& ret, const dvbt_mux_t& mux);
-	void to_str(ss::string_& ret, const any_mux_t& mux);
-	void to_str(ss::string_& ret, const mux_key_t& k);
-	void to_str(ss::string_& ret, const service_t& service);
-	void to_str(ss::string_& ret, const chg_t& chg);
-	void to_str(ss::string_& ret, const chgm_t& channel);
-	void to_str(ss::string_& ret, tune_src_t tune_src);
-	void to_str(ss::string_& ret, key_src_t key_src);
 
 	inline const char* pol_str(const fe_polarisation_t& pol) {
 		return
@@ -228,38 +230,6 @@ namespace chdb {
 			: pol == fe_polarisation_t::V ? "V"
 			: pol == fe_polarisation_t::L ? "L"
 			: "R";
-	}
-
-	inline void to_str(ss::string_& ret, const mux_common_t& t) {
-		ret.sprintf("%p", &t);
-	}
-	inline void to_str(ss::string_& ret, const browse_history_t& t) {
-		ret.sprintf("%p", &t);
-	}
-	inline void to_str(ss::string_& ret, const chgm_key_t& t) {
-		ret.sprintf("%p", &t);
-	}
-	inline void to_str(ss::string_& ret, const fe_delsys_dvbs_t& t) {
-		ret.sprintf("%p", &t);
-	}
-	inline void to_str(ss::string_& ret, const chg_key_t& t) {
-		ret.sprintf("%p", &t);
-	}
-	inline void to_str(ss::string_& ret, const service_key_t& t) {
-		ret.sprintf("%p", &t);
-	}
-
-	template<typename T>
-	inline void to_str(ss::string_& ret, const T& t) {
-	}
-
-
-	template<typename T>
-	inline auto to_str(T&& t)
-	{
-		ss::string<128> s;
-		to_str((ss::string_&)s, (const T&) t);
-		return s;
 	}
 
 	void sat_pos_str(ss::string_& s, int position);
@@ -276,24 +246,6 @@ namespace chdb {
 		matype_str(s, matype, rolloff);
 		return s;
 	}
-
-	std::ostream& operator<<(std::ostream& os, const scan_status_t& scan_status);
-	std::ostream& operator<<(std::ostream& os, const scan_result_t& scan_result);
-	std::ostream& operator<<(std::ostream& os, const language_code_t& code);
-	std::ostream& operator<<(std::ostream& os, const sat_t& sat);
-	std::ostream& operator<<(std::ostream& os, const mux_key_t& mux_key);
-	std::ostream& operator<<(std::ostream& os, const dvbs_mux_t& mux);
-	std::ostream& operator<<(std::ostream& os, const dvbc_mux_t& mux);
-	std::ostream& operator<<(std::ostream& os, const dvbt_mux_t& mux);
-	std::ostream& operator<<(std::ostream& os, const any_mux_t& mux);
-	std::ostream& operator<<(std::ostream& os, const mux_key_t& k);
-	std::ostream& operator<<(std::ostream& os, const service_t& service);
-	std::ostream& operator<<(std::ostream& os, const service_key_t& k);
-	std::ostream& operator<<(std::ostream& os, const fe_polarisation_t& pol);
-	std::ostream& operator<<(std::ostream& os, const chg_t& chg);
-	std::ostream& operator<<(std::ostream& os, const chgm_t& channel);
-	std::ostream& operator<<(std::ostream& os, const tune_src_t tune_src);
-	std::ostream& operator<<(std::ostream& os, const key_src_t key_src);
 
 	inline bool is_same(const chgm_t &a, const chgm_t &b) {
 		if (!(a.k == b.k))
@@ -319,7 +271,11 @@ namespace chdb {
 }
 
 namespace chdb::sat {
-	/*!
+	chdb::band_scan_t& band_scan_for_pol_sub_band(chdb::sat_t& sat, chdb::fe_polarisation_t pol,
+																								chdb::sat_sub_band_t sub_band);
+
+	void clean_band_scan_pols(chdb::sat_t& sat, devdb::lnb_pol_type_t lnb_pol_type);
+/*!
 		find a satellite which is close to position; returns the best match
 		We adopt a tolerance of sat_pos_tolerance.
 	*/
@@ -377,7 +333,7 @@ namespace chdb {
 
 	inline bool is_same_stream(mux_key_t a , const mux_key_t& b) {
 		a.t2mi_pid = b.t2mi_pid;
-		if(a.mux_id == 0 || b.mux_id==0) //tempplate
+		if(a.mux_id == 0 || b.mux_id==0) //template
 			a.mux_id = b.mux_id;
 		return a == b;
 	}
@@ -572,5 +528,41 @@ namespace  chdb::service {
 	void update_audio_pref(db_txn&txn, const chdb::service_t& service);
 	void update_subtitle_pref(db_txn&txn, const chdb::service_t& service);
 }
+
+#define declfmt(t)																											\
+	template <> struct fmt::formatter<t> {																\
+	inline constexpr format_parse_context::iterator parse(format_parse_context& ctx) { \
+		return ctx.begin();																									\
+	}																																			\
+																																				\
+	format_context::iterator format(const t&, format_context& ctx) const ;\
+}
+
+declfmt(chdb::scan_status_t);
+declfmt(chdb::scan_result_t);
+declfmt(chdb::language_code_t);
+declfmt(chdb::sat_sub_band_pol_t);
+declfmt(chdb::band_scan_t);
+declfmt(chdb::sat_t);
+declfmt(chdb::dvbs_mux_t);
+declfmt(chdb::dvbc_mux_t);
+declfmt(chdb::dvbt_mux_t);
+declfmt(chdb::any_mux_t);
+declfmt(chdb::mux_key_t);
+declfmt(chdb::service_t);
+declfmt(chdb::service_key_t);
+declfmt(chdb::fe_polarisation_t);
+declfmt(chdb::chg_t);
+declfmt(chdb::chgm_t);
+declfmt(chdb::tune_src_t);
+declfmt(chdb::key_src_t);
+#if 0 //not implemented
+declfmt(chdb::spectral_peak_t);
+declfmt(chdb::mux_common_t);
+declfmt(chdb::chg_key_t);
+declfmt(chdb::chgm_key_t);
+declfmt(chdb::browse_history_t);
+#endif
+#undef declfmt
 
 #pragma GCC visibility pop

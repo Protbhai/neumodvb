@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -64,6 +64,11 @@ template<typename T>
 inline int deserialize(const ss::bytebuffer_ &ser, T& val, int offset)  {
 	static_assert(std::is_fundamental<T>::value || std::is_enum<T>::value);
 	return decode_ascending(val, ser, offset);
+}
+
+template<>
+inline int deserialize(const ss::bytebuffer_ &ser, std::monostate& val, int offset)  {
+	return offset;
 }
 
 
@@ -221,7 +226,7 @@ inline int deserialize(const ss::bytebuffer_ & ser, ss::string_& str, int offset
 	if(size>0)
 		size -= 1; //stored size includes traling zero
 	if(size>0) {
-		if(offset + (signed)size > ser.size()) {
+		if(size > (unsigned) (ser.size() - offset)) {
 			//printf("Insufficient data to deserialise\n");
 			return -1;
 		}

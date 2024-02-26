@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -76,7 +76,7 @@ namespace dtdemux {
 
 	struct stored_section_t {
 		uint16_t pid{0x1fff};
-		const ss::bytebuffer_& payload;
+		ss::bytebuffer_& payload;
 		int bytes_read{0};
 		bool error{false};
 		bool throw_on_error{false};
@@ -90,7 +90,7 @@ namespace dtdemux {
 				throw bad_data_exception();
 		}
 
-		stored_section_t(const ss::bytebuffer_& payload_, uint16_t pid_)
+		stored_section_t(ss::bytebuffer_& payload_, uint16_t pid_)
 			: pid(pid_)
 			, payload(payload_) {}
 
@@ -98,7 +98,7 @@ namespace dtdemux {
 			return payload.size() - bytes_read;
 		}
 
-		const uint8_t* current_pointer(int size)  {
+		uint8_t* current_pointer(int size)  {
 			if(available() < size) {
 				throw_bad_data();
 				return nullptr;
@@ -174,6 +174,5 @@ namespace dtdemux {
 		bool parse_mhw2_long_summary_section(epg_t& epg, section_header_t& hdr);
 		bool parse_mhw2_long_summary_section(epg_t& epg);
 	};
-	pmt_info_t parse_pmt_section(const ss::bytebuffer_& pmt_section_data, uint16_t pmt_pid);
-	bool crc_is_correct(const ss::bytebuffer_& payload);
+	pmt_info_t parse_pmt_section(ss::bytebuffer_& pmt_section_data, uint16_t pmt_pid);
 };

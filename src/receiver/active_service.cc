@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -60,16 +60,14 @@
 #include "streamparser/packetstream.h"
 #include "streamparser/si.h"
 
-#include "date/date.h"
-#include "date/iso_week.h"
-#include "date/tz.h"
-using namespace date;
-using namespace date::clock_cast_detail;
-
-
 active_service_t::active_service_t
-(active_adapter_t& active_adapter_, const std::shared_ptr<stream_reader_t>& reader)
-	: active_stream_t(active_adapter_.receiver, std::move(reader))
+(
+	receiver_t& receiver,
+	active_adapter_t& active_adapter_,
+	const std::shared_ptr<stream_reader_t>& reader)
+	: active_stream_t(
+		receiver,
+		std::move(reader))
 	, service_thread(*this)
 	, mpm(this, system_clock_t::now())
 	, periodic(60*30)
@@ -78,17 +76,19 @@ active_service_t::active_service_t
 
 
 
-active_service_t::active_service_t(active_adapter_t& active_adapter, const chdb::service_t& current_service_,
-																	 const std::shared_ptr<stream_reader_t>& reader)
-	: active_stream_t(active_adapter.receiver, std::move(reader))
+active_service_t::active_service_t(
+	receiver_t& receiver,
+	active_adapter_t& active_adapter,
+	const chdb::service_t& current_service_,
+	const std::shared_ptr<stream_reader_t>& reader)
+	: active_stream_t(
+		receiver,
+		std::move(reader))
 	, current_service(current_service_)
 	, service_thread(*this)
 	, mpm(this, system_clock_t::now())
 	, periodic(60*30)
 {
-	dttime_init();
-	update_epg(now); // get initial epg
-	dttime(200);
 }
 
 ss::string<32> active_service_t::name() const { return current_service.name.c_str(); }
@@ -110,45 +110,34 @@ void active_service_t::close() {
 int active_service_t::deactivate() {
 	log4cxx::NDC(name());
 	int ret = 0;
-	dtdebugx("deactivate service");
+	dtdebugf("deactivate service");
 	if (registered_scam) {
 		auto& scam_thread = receiver.scam_thread;
 		auto future = scam_thread.push_task(
 				[this, &scam_thread]() { return cb(scam_thread).unregister_active_service(this, get_adapter_no()); });
-		dtdebugx("deactivate stream");
+		dtdebugf("deactivate stream");
 		ret = active_stream_t::deactivate();
 		future.wait(); // must be synchronous or problems will occur
-		dtdebugx("scam_thread unregister_active_service done");
+		dtdebugf("scam_thread unregister_active_service done");
 		registered_scam = false;
 	} else
 		ret = active_stream_t::deactivate();
-	dtdebugx("deactivate service done");
+	dtdebugf("deactivate service done");
 	return ret;
 }
 
-void service_thread_t::cb_t::update_recording(recdb::rec_t& rec, const chdb::service_t& service,
-																							const epgdb::epg_record_t& epgrec) {
-	active_service.mpm.update_recording(rec, service, epgrec);
-}
-
 int service_thread_t::exit() {
-	dtdebug("Starting to exit");
+	dtdebugf("Starting to exit");
 	active_service.deactivate();
 	active_service.mpm.destroy();
-	dtdebug("Ended exit");
+	dtdebugf("Ended exit");
 	return -1;
 }
 
-std::optional<recdb::rec_t> service_thread_t::cb_t::start_recording(subscription_id_t subscription_id, const recdb::rec_t& rec) {
+std::optional<recdb::rec_t> service_thread_t::cb_t::start_recording(
+	subscription_id_t subscription_id, const recdb::rec_t& rec) {
 	recdb::rec_t recnew = active_service.mpm.start_recording(subscription_id, rec);
 	assert(recnew.epg.rec_status == epgdb::rec_status_t::IN_PROGRESS);
-	auto* tuner_thread = &active_service.receiver.tuner_thread;
-
-	tuner_thread->push_task([tuner_thread, recnew]() // recnew must be passed by value!
-													{
-														cb(*tuner_thread).update_recording(recnew);
-														return 0;
-													}); //.wait();
 	return recnew;
 }
 
@@ -156,33 +145,10 @@ int service_thread_t::cb_t::stop_recording(const recdb::rec_t& rec_in, mpm_copyl
 	return active_service.mpm.stop_recording(rec_in, copy_commands);
 }
 
-void service_thread_t::cb_t::forget_recording(const recdb::rec_t& rec_in) {
-	return active_service.mpm.forget_recording(rec_in);
+void service_thread_t::cb_t::forget_recording_in_livebuffer(const recdb::rec_t& rec_in) {
+	return active_service.mpm.forget_recording_in_livebuffer(rec_in);
 }
 
-/*!
-	epg_record is either an updated epg record or an epg record which was not considered
-	earlier
-
-	We maintain all relevant epg records in a time range
- */
-void active_service_t::on_epg_update(system_time_t now, const epgdb::epg_record_t& epg_record) {
-	auto now_ = system_clock_t::to_time_t(now);
-	assert(epg_record.k.service.service_id == current_service.k.service_id); // sanity check
-	if (epg_record.end_time < system_clock_t::to_time_t(mpm.creation_time))
-		return; // record is too old; do not update
-	if (epg_record.k.start_time > now_ + 120 * 60)
-		return; // record is too new; do not update
-	auto txnrecepg = mpm.db->mpm_rec.recepgdb.wtxn();
-	auto ret = epgdb::save_epg_record_if_better(txnrecepg, epg_record);
-	if (ret) {
-		if (epg_record.k.start_time <= now_ && now_ < epg_record.end_time) {
-			auto mm = mpm.meta_marker.writeAccess();
-			mm->update_epg(epg_record);
-		}
-	}
-	txnrecepg.commit();
-}
 
 void active_service_t::save_pmt(system_time_t now_, const pmt_info_t& pmt_info) {
 	auto now = system_clock_t::to_time_t(now_);
@@ -213,23 +179,19 @@ playback_info_t active_service_t::get_current_program_info() const {
 	return ret;
 }
 
-void service_thread_t::cb_t::on_epg_update(system_time_t now, const epgdb::epg_record_t& epg_record) {
-	active_service.on_epg_update(now, epg_record);
-}
-
 /*
 	called when a pmt has been fully processed in the service's data
 	stream. This function is set as a callback in live_mpm.cc
  */
 void active_service_t::update_pmt(const pmt_info_t& pmt, bool isnext, const ss::bytebuffer_& sec_data) {
 	using namespace dtdemux;
-	dtdebug(pmt);
+	dtdebugf("{}", pmt);
 	have_pmt = true;
 	pmt_is_encrypted = false;
 
 	if (pmt.service_id != current_service.k.service_id) {
 		// This can happen according to the dvb specs
-		dtdebugx("received pmt for wrong service_id: pid=%d service_id=%d!=%d", pmt.pmt_pid, pmt.service_id,
+		dtdebugf("received pmt for wrong service_id: pid={:d} service_id={:d}!={:d}", pmt.pmt_pid, pmt.service_id,
 						 current_service.k.service_id);
 		return;
 	}
@@ -246,15 +208,15 @@ void active_service_t::update_pmt(const pmt_info_t& pmt, bool isnext, const ss::
 		auto active_adapter_p = active_adapter.shared_from_this();
 		// pmt deliberately passed by value
 		if (service_changed) {
-			receiver.tuner_thread.push_task([this, active_adapter_p, pmt, service = current_service] {
-				auto& cb_ = cb(receiver.tuner_thread);
+			active_adapter.tuner_thread.push_task([active_adapter_p, pmt, service = current_service] {
+				auto& cb_ = cb(active_adapter_p->tuner_thread);
 				cb_.on_pmt_update(*active_adapter_p, pmt); //update epg types in dvbs_mux in database
 				cb_.update_service(service); //update service record in database
 				return 0;
 			});
 		} else {
-			active_adapter.tuner_thread.push_task([this, active_adapter_p, pmt] {
-				cb(receiver.tuner_thread).on_pmt_update(*active_adapter_p, pmt);
+			active_adapter.tuner_thread.push_task([active_adapter_p, pmt] {
+				cb(active_adapter_p->tuner_thread).on_pmt_update(*active_adapter_p, pmt);
 				return 0;
 			});
 		}
@@ -290,7 +252,7 @@ void active_service_t::update_pmt(const pmt_info_t& pmt, bool isnext, const ss::
 	}
 
 	if (isnext) {
-		dtdebugx("Unhandled PMT NEXT: service=%d", pmt.service_id);
+		dtdebugf("Unhandled PMT NEXT: service={:d}", pmt.service_id);
 		return;
 	}
 	int old_size = open_pids.size(); //
@@ -322,7 +284,7 @@ void active_service_t::update_pmt(const pmt_info_t& pmt, bool isnext, const ss::
 	process(PAT_PID);
 	using namespace stream_type;
 	for (const auto& pidinfo : pmt.pid_descriptors) {
-		// dtdebug(pidinfo);
+		// dtdebugf(pidinfo);
 		if (is_video(pidinfo.stream_type) || is_audio(pidinfo) || pidinfo.has_subtitles())
 			process(pidinfo.stream_pid);
 		/*the following code will reuse any existing parser
@@ -374,43 +336,6 @@ void active_service_t::update_pmt_pid(int new_pmt_pid) {
 	 */
 }
 
-
-/*!
-	Add newer epg records which are not yet present
- */
-void active_service_t::update_epg_(db_txn& parent_txn, const system_time_t now, meta_marker_t* mm) {
-	auto now_ = system_clock_t::to_time_t(now);
-	auto dst_epg_txn = parent_txn.child_txn(mpm.db->mpm_rec.recepgdb);
-	auto src_epg_txn = receiver.epgdb.rtxn();
-	auto start = now;
-	auto timeshift_duration = receiver.options.readAccess()->timeshift_duration;
-	for (;;) {
-		auto rec = epgdb::running_now(src_epg_txn, current_service.k, start);
-		if (!rec)
-			break; // no more records
-		if (rec->k.start_time > system_clock_t::to_time_t(now + timeshift_duration))
-			break;
-		put_record(dst_epg_txn, *rec);
-		if ((*rec).k.start_time <= now_ && now_ < (*rec).end_time && mm) {
-			mm->update_epg(*rec);
-			mm = nullptr;
-		}
-		start = system_clock_t::from_time_t(rec->end_time + 1); // so that we can find the next record
-	}
-	dst_epg_txn.commit();
-}
-
-void active_service_t::update_epg(system_time_t now, meta_marker_t* mm) {
-	auto txn = mpm.db->mpm_rec.idxdb.wtxn();
-	if (!mm) {
-		auto w = mpm.meta_marker.writeAccess();
-		update_epg_(txn, now, &*w); // get initial epg
-	} else {
-		update_epg_(txn, now, mm); // get initial epg
-	}
-	txn.commit();
-}
-
 /*!
 	periodically called to remove old data in timeshift bufferl so that it does not grow larger than
 	what user wants
@@ -456,11 +381,10 @@ void active_service_t::housekeeping(system_time_t now) {
 int service_thread_t::run() {
 
 	ss::string<128> ch_prefix;
+	ch_prefix.format("CH[{}:{}] {}", (int)active_service.get_adapter_no(),
+									 (int)active_service.current_service.k.service_id,
+									 (const char*)active_service.current_service.name.c_str());
 
-	auto saved = active_service.shared_from_this();
-
-	ch_prefix << "CH[" << active_service.get_adapter_no() << ":" << active_service.current_service.k.service_id << "]"
-						<< active_service.current_service.name;
 	char name[16];
 	snprintf(name, 16, "%s", ch_prefix.c_str());
 	name[15] = 0;
@@ -472,13 +396,13 @@ int service_thread_t::run() {
 
 	timer_start(10); // fix recordings every few seconds
 	if (active_service.open() < 0) {
-		dterror("Could not open channel");
+		dterrorf("Could not open channel");
 		return -1;
 	}
 	for (;;) {
 		auto n = epoll_wait(2000);
 		if (n < 0) {
-			dterror("error in poll");
+			dterrorf("error in poll");
 			continue;
 		}
 		for (auto evt = next_event(); evt; evt = next_event()) {
@@ -488,7 +412,7 @@ int service_thread_t::run() {
 					 If the task is "exit", then run_tasks will return -1
 				*/
 				if (run_tasks(now) < 0) {
-					dterror("Exiting");
+					dterrorf("Exiting");
 					return 0;
 				}
 			} else if (is_timer_fd(evt)) {
@@ -499,11 +423,11 @@ int service_thread_t::run() {
 			} else if (active_service.reader->on_epoll_event(evt)) {
 				// this must be a channel data event
 				if (!(evt->events & EPOLLIN)) {
-					dterror("Unexpected event: type=" << evt->events);
+					dterrorf("Unexpected event: type={}", evt->events);
 				}
 				active_service.mpm.process_channel_data();
 			} else {
-				dtdebug("event from unknown fd\n");
+				dtdebugf("event from unknown fd\n");
 				assert(0);
 			}
 		}
@@ -514,7 +438,7 @@ int service_thread_t::run() {
 
 void active_service_t::restart_decryption(uint16_t ecm_pid, system_time_t t) {
 	std::scoped_lock lck(mutex);
-	dtdebugx("Restart decryption for pid %d", ecm_pid);
+	dtdebugf("Restart decryption for pid {:d}", ecm_pid);
 	if (current_pmt.is_ecm_pid(ecm_pid)) {
 		/*set a flag indicating that decryption was interrupted,
 			while locking a mutex
@@ -564,26 +488,15 @@ void active_service_t::mark_ecm_sent(bool odd, uint16_t ecm_pid, system_time_t t
 	}
 }
 
-recdb::live_service_t active_service_t::get_live_service() const {
-
-	auto epg = mpm.meta_marker.readAccess()->get_current_epg();
+recdb::live_service_t active_service_t::get_live_service(subscription_id_t subscription_id) const {
 	const char* p = mpm.dirname.c_str() + receiver.options.readAccess()->live_path.size();
 	if (p[0] == '/')
 		p++;
 	assert(p - mpm.dirname.c_str() < mpm.dirname.size());
-	return recdb::live_service_t(system_clock_t::to_time_t(mpm.creation_time), get_adapter_no(),
-															 system_clock_t::to_time_t(now), get_current_service(), p, epg);
-}
-
-recdb::live_service_t active_service_t::get_live_service_key() const {
-
-	const char* p = mpm.dirname.c_str() + receiver.options.readAccess()->live_path.size();
-	if (p[0] == '/')
-		p++;
-	recdb::live_service_t ret{};
-	ret.creation_time = system_clock_t::to_time_t(mpm.creation_time);
-	ret.adapter_no = get_adapter_no();
-	return ret;
+	//note that last_use_time is set to -1, meaning: still being used
+	return recdb::live_service_t(getpid() /*owner*/ , (int)subscription_id,
+															 system_clock_t::to_time_t(mpm.creation_time), get_adapter_no(),
+															 -1, get_current_service(), p/*, epg*/);
 }
 
 std::unique_ptr<playback_mpm_t> active_service_t::make_client_mpm(subscription_id_t subscription_id) {
@@ -658,4 +571,51 @@ bool active_service_t::need_decryption() {
 		}
 		return ret;
 	}
+}
+
+void active_service_t::destroy() {
+#ifndef NDEBUG
+#endif
+	assert(service_thread.has_exited());
+}
+
+active_service_t::~active_service_t() {
+#ifndef NDEBUG
+	assert(service_thread.has_exited());
+#endif
+}
+
+std::optional<recdb::rec_t>
+active_service_t::start_recording(subscription_id_t subscription_id, const recdb::rec_t& rec_in)
+{
+	std::vector<task_queue_t::future_t> futures;
+	std::optional<recdb::rec_t> rec;
+	auto& as = this->service_thread;
+	assert((int) subscription_id == rec_in.subscription_id);
+	futures.push_back(as.push_task(
+											// subscription_id is stored in the recording itself
+											//Pass by reference is safe because we call wait_for_all
+											[&as, &rec, &rec_in, subscription_id]() {
+												rec = cb(as).start_recording(subscription_id, rec_in);
+												return 0;
+											}));
+
+	bool error = wait_for_all(futures);
+	if (error) {
+		dterrorf("Unhandled error in unsubscribe");
+	}
+
+	if((int)subscription_id < 0 && receiver.global_subscriber) {
+		ss::string<256> msg;
+		msg.format("Could not start recording: {}\n{}\n{}", rec_in.epg.event_name, rec_in.service.name, get_error());
+		receiver.global_subscriber->notify_error(msg);
+	}
+	/*wait_for_futures is needed because active_adapters/channels may be removed from reserved_services and subscribed_aas
+		This could cause these structures to be destroyed while still in use by by stream/active_adapter threads
+
+		See
+		https://stackoverflow.com/questions/50799719/reference-to-local-binding-declared-in-enclosing-function?noredirect=1&lq=1
+	*/
+
+	return rec;
 }

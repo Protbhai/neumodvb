@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -110,7 +110,13 @@ namespace dtdemux {
 		bool completed = false;
 		uint32_t section_flags[16]{0};
 		inline bool set_flag(int idx);
+#if 0
+		inline void unset_flag(int idx);
+#endif
 		inline section_type_t set_flag(const section_header_t& hdr);
+#if 0
+		inline void unset_flag(const section_header_t& hdr);
+#endif
 		completion_status_t() = default;
 
 		inline completion_status_t(const section_header_t& hdr);
@@ -132,7 +138,7 @@ namespace dtdemux {
 		//steady_time_t start_time{0};
 
 		std::map<subtable_key_t, completion_status_t> cstates;
-		std::map<uint8_t, table_timeout_t> table_timeouts; //indexed by table id
+		std::array<std::unique_ptr<table_timeout_t>, 256> table_timeouts; //indexed by table id
 
 		inline completion_status_t& completion_status_for_section(const section_header_t& hdr);
 
@@ -144,9 +150,6 @@ namespace dtdemux {
 		void reset();
 		void reset(const section_header_t& hdr);
 		bool timedout_now(uint8_t table_id);
-#if 0
-		void stats();
-#endif
 
 /*
 	check if a section was already processed.
@@ -155,11 +158,14 @@ namespace dtdemux {
 	returns: timedout, new_subtable_version, section_type
  */
 		std::tuple<bool, bool, section_type_t> check(const section_header_t& hdr, int cc_error_counter);
-
+#if 0
+		void forget_section(const section_header_t& hdr);
+#endif
 		std::tuple<int, int> get_counts() const {
 			return std::make_tuple(count_completed, cstates.size());
 		}
-
-		void dump_cstates();
+#if 0
+		void dump_cstates(int pid);
+#endif
 	};
 }

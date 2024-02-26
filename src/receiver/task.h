@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -105,6 +105,14 @@ public:
 
 	typedef std::queue<task_t> queue_t;
 
+/*
+	The following future is for "wait_for_exit_task", which will be run after the thread's run() has finished.
+	At that stage the the threads resources will have been released, so it is not possible to store the
+	task itself safely in task_queue_t, because task_queue_t may already have been deleted when wait_for_exit_task
+	is actually run. However it is safe to store a future and retrieve this future before task_queue_t is
+	destroyed and then use it to wait for task_queue_t's thread to end
+ */
+	future_t exit_future;
 private:
 	thread_group_t thread_group;
 	std::array<struct epoll_event, 8> events;
@@ -113,17 +121,19 @@ private:
 protected:
 	//time_t now {}; //current time
 	bool must_exit_ = false ; //a command can set this to true to request thread exit
+	bool has_exited_ = false ; //a command can set this to true after threads has cleanly exited
 private:
 	mutable std::mutex mutex;
 	mutable queue_t tasks;
 protected:
-	int timer_fd = -1;
+	int timer_fd = -1; //for running periodic tasks
+	int wait_timer_fd = -1; //for waiting until a specific time once
 	mutable event_handle_t notify_fd;
 public:
 	epoll_t epx;
 protected:
 	std::thread thread_;
-	//std::thread::id owner;
+	std::thread::id owner; //needed to remember thread id when associated thread has exited (destructors)
 	std::future<int> status_future;
 	virtual int run() = 0;
 	virtual int exit() = 0;
@@ -131,7 +141,7 @@ protected:
 public:
 
 	inline bool must_exit() {
-		std::lock_guard<std::mutex> lk(mutex);
+		std::scoped_lock<std::mutex> lk(mutex);
 		return must_exit_;
 	}
 
@@ -152,7 +162,7 @@ protected:
 		log4cxx::MDC::put( "thread_name", name);
 	}
 
-	bool is_timer_fd(const epoll_event* event) const {
+	inline bool is_timer_fd(const epoll_event* event) const {
 		bool ret =event->data.fd== int(timer_fd);
 		if(!ret)
 			return ret;
@@ -161,27 +171,48 @@ protected:
 			if(read(timer_fd, (void*)&val, sizeof(val))>=0)
 				return ret;
 			if(errno!=EINTR) {
-				dterrorx("error while reading timerfd: %s", strerror(errno));
+				dterrorf("error while reading timerfd: {:s}", strerror(errno));
 				return true;
 			}
 		}
 	}
 
-	void timer_start(double period_sec=2.0)
+	inline bool is_wait_timer_fd(const epoll_event* event) {
+		bool ret =event->data.fd== int(wait_timer_fd);
+		if(!ret)
+			return ret;
+		epx.remove_fd(wait_timer_fd);
+		for(;;) {
+			uint64_t val;
+			if(read(wait_timer_fd, (void*)&val, sizeof(val))>=0) {
+				return ret;
+				if(errno!=EINTR) {
+					dterrorf("error while reading timerfd: {:s}", strerror(errno));
+					return true;
+				}
+			}
+		}
+	}
+
+	inline void timer_start(double period_sec=2.0)
 		{
-			timer_fd  = ::timer_start(period_sec);
+			timer_fd  = ::periodic_timer_create_and_start(period_sec);
 			epx.add_fd(timer_fd, EPOLLIN|EPOLLERR|EPOLLHUP);
 		}
 
-	void timer_set_period(double period_sec)
+	inline void timer_set_period(double period_sec)
 		{
-			::timer_set_period(timer_fd, period_sec);
+			::timer_set_once(timer_fd, period_sec);
 		}
 
-
-	void timer_stop() {
+	inline void timer_stop() {
 		epx.remove_fd(timer_fd);
 		::timer_stop(timer_fd);
+	}
+
+	inline void wait_abort() {
+		epx.remove_fd(wait_timer_fd);
+		::timer_stop(wait_timer_fd);
 	}
 
 	int run_() {
@@ -190,10 +221,30 @@ protected:
 #endif
 		try {
 			::thread_group = this->thread_group;
-			return run();
+			/*
+				we store this task on the stack, so that we can safely execute it later,
+				even if the task_queue datastructure has veen been destroyed
+			 */
+			auto wait_for_exit_task = task_t([]() {
+				task_result_t ret;
+				return ret;
+			});
+
+			/*
+				save a future which can be used to wait for thread desctruction
+			 */
+			exit_future = wait_for_exit_task.get_future();
+			auto ret = run();
+			this->has_exited_=true;
+
+			wait_for_exit_task();
+
+			return ret;
 		} catch (const std::exception& e) { // caught by reference to base
-			dterror("exception was caught: " << e.what());
+			dterrorf("exception was caught: {}", e.what());
+			assert(0);
     }
+		this->has_exited_=true;
 		return -1;
 	}
 
@@ -202,15 +253,28 @@ protected:
 	}
 public:
 
+	inline void request_wakeup(double seconds) {
+		if(wait_timer_fd <0) {
+			wait_timer_fd = timerfd_create(CLOCK_MONOTONIC, 0);
+			epx.add_fd(wait_timer_fd, EPOLLIN|EPOLLERR|EPOLLHUP);
+		}
+		timer_set_once(wait_timer_fd, seconds);
+	}
 
 	void start_running() {
 		auto task = std::packaged_task<int(void)>(std::bind(&task_queue_t::run_, this));
 		status_future= task.get_future();
 		thread_= std::thread(std::move(task));
+		owner = thread_.get_id();
 	}
 
 
-	void stop_running(bool wait) {
+	bool has_exited() const {
+		std::scoped_lock<std::mutex> lk(mutex);
+		return has_exited_;
+	}
+
+	future_t stop_running(bool wait) {
 		assert(!must_exit_);
 
 		auto f = push_task_and_exit( [this](){
@@ -221,8 +285,16 @@ public:
 			f.wait();
 			status_future.wait();
 			thread_.join();
-		} else
+			return {};
+		} else {
 			thread_.detach();
+			/*
+				This future can be used to safely wait for thread exit, even well after the task_queue_t data structure
+				has been destroyed
+			 */
+			return std::move(exit_future);
+		}
+		return f;
 	}
 
 	int wait() {
@@ -230,19 +302,19 @@ public:
 	}
 
 	task_queue_t(thread_group_t thread_group) :thread_group(thread_group)  {
-		//owner=std::this_thread::get_id();
 		epx.add_fd(int(notify_fd), EPOLLIN|EPOLLERR|EPOLLHUP);
 #ifdef DTDEBUG
 		epx.set_owner((pid_t)-1);
 #endif
 	}
 
-	virtual ~task_queue_t() {
+	~task_queue_t() {
+
 	}
 
 	future_t push_task_(std::function<int()>&& callback, bool must_exit=false) {
 		if(std::this_thread::get_id() == this->thread_.get_id()) {
-			dterror("Thread calls back to itself");
+			dterrorf("Thread calls back to itself");
 			//assert(0);
 		}
 		task_t task([callback{std::move(callback)}]() {
@@ -251,21 +323,30 @@ public:
 			ret.errmsg = user_error_;
 			return ret;
 		});
+		if(this->must_exit_) {
+			dterrorf("Ignored pushing task while exit is in progress");
+			task_t dummy_task([]() {
+				task_result_t ret;
+				ret.retval = -1;
+				ret.errmsg = "thread has exited; cannot run task";
+				return ret;
+			});
+			auto ret {dummy_task.get_future()};
+			dummy_task();
+			return ret;
+		}
 		auto f = task.get_future();
 
-		std::lock_guard<std::mutex> lk(mutex);
+		std::scoped_lock<std::mutex> lk(mutex);
 
 		if(must_exit) {
 			if(this->must_exit_) //avoid calling stop_running multiple times
 				return {};
 			this->must_exit_ = true;
 		}
-		if(must_exit_)
-			tasks = {}; //clear queue
-
 		tasks.push(std::move(task));
 		if(tasks.size()>=10)
-			printf("large nunber of tasks %ld\n", tasks.size());
+			dtdebugf("large nunber of tasks {:d}", tasks.size());
 		notify_fd.unblock();
 		return f;
 	}
@@ -282,7 +363,6 @@ public:
 		notify_fd.reset();
 	}
 	void _pop_task() {
-		//assert(mutex.is_locked());
 		tasks.pop();
 	}
 
@@ -353,15 +433,14 @@ protected:
 };
 
 
-
 template<typename T> typename T::cb_t& cb(T& t) { //activate callbacks
 //	auto* self = dynamic_cast<typename T::cb_t*>(&t);
 	auto* self = (typename T::cb_t*)(&t);
 	auto* q = dynamic_cast<task_queue_t*>(&t);
 	if(!self || !q)
-		dterror("Implementation error");
-	if(std::this_thread::get_id() != q->thread_.get_id()) {
-		dterror("Callback called from the wrong thread");
+		dterrorf("Implementation error");
+	if(std::this_thread::get_id() != q->owner) {
+		dterrorf("Callback called from the wrong thread");
 		assert(0);
 	}
 	return *self;
@@ -370,10 +449,10 @@ template<typename T> typename T::cb_t& cb(T& t) { //activate callbacks
 template<typename T> const typename T::cb_t& cb(const T& t) { //activate callbacks
 	auto* self = (const typename T::cb_t*)(&t);
 	if(!self)
-		dterror("Implementation error");
+		dterrorf("Implementation error");
 	return *self;
 }
-bool wait_for_all(std::vector<task_queue_t::future_t>& futures);
+bool wait_for_all(std::vector<task_queue_t::future_t>& futures, bool clear_errors=false);
 
 #if 0
 template<typename T> typename T::thread_safe_t& ts(T& t) { //activate callbacks
@@ -381,9 +460,9 @@ template<typename T> typename T::thread_safe_t& ts(T& t) { //activate callbacks
 	auto* self = (typename T::cb_t*)(&t);
 	auto* q = dynamic_cast<task_queue_t*>(&t);
 	if(!self || !q)
-		dterror("Implementation error");
+		dterrorf("Implementation error");
 	if(std::this_thread::get_id() != q->thread_.get_id()) {
-		dterror("Callback called from the wrong thread");
+		dterrorf("Callback called from the wrong thread");
 		assert(0);
 	}
 	return *self;
@@ -394,9 +473,9 @@ template<typename T> const typename T::thread_safe_t& ts(const T& t) { //activat
 	auto* self = (const typename T::cb_t*)(&t);
 	auto* q = dynamic_cast<const task_queue_t*>(&t);
 	if(!self || !q)
-		dterror("Implementation error");
+		dterrorf("Implementation error");
 	if(std::this_thread::get_id() != q->thread_.get_id()) {
-		dterror("Callback called from the wrong thread");
+		dterrorf("Callback called from the wrong thread");
 		assert(0);
 	}
 	return *self;

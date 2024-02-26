@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -38,10 +38,6 @@ import pyrecdb
 import pychdb
 import pyepgdb
 
-
-def IsNumericKey(keycode):
-    return keycode >= ord('0') and keycode <= ord('9')
-
 class RecTable(NeumoTable):
     CD = NeumoTable.CD
     datetime_fn =  lambda x: datetime.datetime.fromtimestamp(x[1], tz=tz.tzlocal()).strftime("%Y-%m-%d %H:%M:%S") \
@@ -52,21 +48,18 @@ class RecTable(NeumoTable):
     all_columns = \
         [
          CD(key='epg.rec_status',  label='Status', basic=True,  dfn=lambda x: lastdot(x)),
-         CD(key='epg.k.start_time', label='EStart', dfn=datetime_fn, example="2020-11-15 15:30"),
-         CD(key='epg.end_time',  label='EEnd', dfn=time_fn, example="15:40"),
-         CD(key='real_time_start', label='Start', basic=True, dfn=datetime_fn),
-         CD(key='real_time_end',  label='End', basic=True, dfn=datetime_fn),
+         CD(key='epg.k.start_time', label='EStart', dfn=datetime_fn, readonly=True, example="2020-11-15 15:30"),
+         CD(key='epg.end_time',  label='EEnd', dfn=time_fn, readonly=True, example="15:40"),
+         CD(key='real_time_start', label='Start', basic=True, readonly=True, dfn=datetime_fn),
+         CD(key='real_time_end',  label='End', basic=True, readonly=True, dfn=datetime_fn),
          CD(key='pre_record_time',  label='Pre', example="100"),
          CD(key='post_record_time',  label='Post', example="100"),
          CD(key='service.ch_order', label='#', basic=True, example="10000"),
          CD(key='service.name',  label='Service', basic=True, example="Investigation disc"),
          CD(key='epg.event_name',  label='Program', basic=True, example="Investigation discovery12345 Investigation discovery12345 "),
-         CD(key='stream_time_start',  label='Start'),
-         CD(key='stream_time_end', label='End'),
+         CD(key='stream_time_start',  label='Start', readonly=True),
+         CD(key='stream_time_end', label='End', readonly=True),
          ]
-
-    def InitialRecord(self):
-        return self.app.currently_selected_rec
 
     def __init__(self, parent, basic=False, *args, **kwds):
         initial_sorted_column = 'real_time_start'
@@ -112,15 +105,24 @@ class RecGridBase(NeumoGridBase):
         self.sort_order = 0
         self.sort_column = None
         self.Bind(wx.EVT_KEY_DOWN, self.OnKeyDown)
-        self.grid_specific_menu_items=['epg_record_menu_item']
+
+    def InitialRecord(self):
+        return self.app.currently_selected_rec
 
     def OnShow(self, evt):
         super().OnShow(evt)
 
-    def OnToggleRecord(self, evt):
+    def CmdToggleRecord(self, evt):
+        row = self.GetGridCursorRow()
+        rec = self.table.screen.record_at_row(row)
+        dtdebug(f'CmdToggleRecord {rec}')
+        from neumodvb.record_dialog import show_record_dialog
+        show_record_dialog(self, rec, start_time=start_time)
+
+    def CmdAutoRec(self, evt):
         row = self.GetGridCursorRow()
         rec = self.screen.record_at_row(row)
-        dtdebug(f'OnToggleRecord {rec}')
+        dtdebug(f'CmdAutoRec {rec}')
         return rec, None
 
     def OnKeyDown(self, evt):
@@ -143,10 +145,12 @@ class RecGridBase(NeumoGridBase):
                 dtdebug(f'RETURN pressed on row={row}: PLAY rec={rec.filename}')
                 self.app.PlayRecording(rec)
             evt.Skip(False)
-        elif not self.EditMode() and IsNumericKey(keycode):
-            self.MoveToChno(ask_channel_number(self, keycode- ord('0')))
         else:
-            evt.Skip(True)
+            from neumodvb.channelno_dialog import ask_channel_number, IsNumericKey
+            if not self.EditMode() and IsNumericKey(keycode):
+                self.MoveToChno(ask_channel_number(self, keycode- ord('0')))
+            else:
+                evt.Skip(True)
 
     def EditMode(self):
         return  self.GetParent().GetParent().edit_mode
@@ -157,6 +161,9 @@ class RecGridBase(NeumoGridBase):
         dtdebug (f'CmdPlay requested for row={row}: PLAY service={rec.filename}')
         self.table.SaveModified()
         self.app.PlayRecording(rec)
+
+    def OnTimer(self, evt):
+        super().OnTimer(evt)
 
 class BasicRecGrid(RecGridBase):
     def __init__(self, *args, **kwds):

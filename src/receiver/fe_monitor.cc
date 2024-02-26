@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -42,36 +42,34 @@
 
 std::shared_ptr<fe_monitor_thread_t> fe_monitor_thread_t::make(receiver_t& receiver,
 																															 std::shared_ptr<dvb_frontend_t>& fe) {
-	auto w = fe->ts.writeAccess();
-	assert(w->fefd < 0);
+	auto fefd = fe->open_device();
 	auto p = std::make_shared<fe_monitor_thread_t>(receiver, fe);
-	fe->open_device(*w);
-	dtdebugx("starting frontend_monitor %p: fefd=%d\n", fe.get(), w->fefd);
-	p->epoll_add_fd(w->fefd,
+	dtdebugf("starting frontend_monitor {:p}: fefd={:d}\n", fmt::ptr(fe.get()), fefd);
+	p->epoll_add_fd(fefd,
 									EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLET); // will be used to monitor the frontend edge triggered!
 	p->start_running();
 	return p;
 }
 
-void fe_monitor_thread_t::monitor_signal() {
-	auto m = fe->ts.readAccess()->tune_mode;
-	if (m != tune_mode_t::NORMAL && m != tune_mode_t::BLIND)
-		return;
+void fe_monitor_thread_t::update_lock_status_and_signal_info(fe_status_t fe_status) {
 
 	bool get_constellation{true};
-	auto info = fe->get_signal_info(get_constellation);
+	auto info_ = fe->update_lock_status_and_signal_info(fe_status, get_constellation);
+	if(!info_)
+		return;
+	auto& info = *info_;
 	bool verbose = false;
 	if (verbose) {
-		dtdebug("------------------------------------------------------");
+		dtdebugf("------------------------------------------------------");
 	}
 
 	if (verbose) {
 		auto &e = info.last_stat();
-		dtdebug("Signal strength: " << std::fixed << std::setprecision(1) << (e.signal_strength * 1e-3) << "dB"
-						<< " CNR: " << (e.snr * 1e-3) << "dB");
+		dtdebugf("Signal strength: {:.1f}dB  CNR:  {:1.f}dN",
+						 (e.signal_strength * 1e-3), (e.snr * 1e-3));
 	}
 	dttime_init();
-	receiver.notify_signal_info(info);
+	receiver.on_signal_info(info, fe->get_subscription_ids());
 	dttime(200);
 	{
 		auto w = fe->signal_monitor.writeAccess();
@@ -81,11 +79,13 @@ void fe_monitor_thread_t::monitor_signal() {
 }
 
 void fe_monitor_thread_t::handle_frontend_event() {
+	using namespace devdb;
+
 	struct dvb_frontend_event event {};
 	auto fefd = fe->ts.readAccess()->fefd;
 	int r = ioctl(fefd, FE_GET_EVENT, &event);
 	if (r < 0) {
-		dtdebugx("FE_GET_EVENT stat=0x%x errno=%d err=%s\n", event.status, errno, strerror(errno));
+		dtdebugf("FE_GET_EVENT stat=0x{:x} errno={:d} err={:s}\n", (int)event.status, errno, strerror(errno));
 		return;
 	}
 
@@ -111,7 +111,7 @@ void fe_monitor_thread_t::handle_frontend_event() {
 	bool timedout = event.status & FE_TIMEDOUT;
 #pragma unused(timedout)
 #if 0
-	dtdebugx("SIGNAL: signal=%d carrier=%d viterbi=%d sync=%d lock=%d timedout=%d\n", signal, carrier, viterbi, has_sync,
+	dtdebugf("SIGNAL: signal={:d} carrier={:d} viterbi={:d} sync={:d} lock={:d} timedout={:d}\n", signal, carrier, viterbi, has_sync,
 					 has_lock, timedout);
 #endif
 	bool done = signal && carrier && viterbi && has_sync && has_lock;
@@ -122,15 +122,20 @@ void fe_monitor_thread_t::handle_frontend_event() {
 			return;
 		}
 		ss::string<128> spectrum_path = receiver.options.readAccess()->spectrum_path.c_str();
-		auto result = fe->get_spectrum(spectrum_path);
-		if (result) {
+		auto scan = fe->get_spectrum(spectrum_path);
+		if (scan && scan->spectrum && fe->ts.readAccess()->tune_options.spectrum_scan_options.save_spectrum) {
 			auto txn = receiver.statdb.wtxn();
-			auto& spectrum = *result;
+			auto& spectrum = *scan->spectrum;
 			auto c = statdb::spectrum_t::find_by_key(txn, spectrum.k);
 			put_record(txn, spectrum);
 			txn.commit();
-			receiver.notify_spectrum_scan(spectrum);
 		}
+		assert(scan);
+		auto finished_fe = fe->dbfe();
+		assert (scan->start_freq !=0);
+		assert (scan->end_freq !=0);
+
+		receiver.on_spectrum_scan_end(finished_fe, *scan, fe->get_subscription_ids());
 	}
 
 		break;
@@ -139,20 +144,21 @@ void fe_monitor_thread_t::handle_frontend_event() {
 	case tune_mode_t::BLIND:
 	case tune_mode_t::POSITIONER_CONTROL:
 	case tune_mode_t::UNCHANGED:
-		fe->set_lock_status(event.status);
 		if (fe->api_type == api_type_t::NEUMO)
-			monitor_signal();
+			update_lock_status_and_signal_info(event.status);
+		else
+			fe->set_lock_status(event.status);
 		break;
 	}
 }
 
 int fe_monitor_thread_t::cb_t::pause() {
 	ss::string<64> fe_name;
-	fe_name.sprintf("fe %d.%d", (int)fe->adapter_no, (int)fe->frontend_no);
+	fe_name.format("fe {:d}.{:d}", (int)fe->adapter_no, (int)fe->frontend_no);
 	set_name(fe_name.c_str());
 	log4cxx::MDC::put("thread_name", fe_name.c_str());
 	this->is_paused = true;
-	dtdebugx("frontend_monitor pause: %p: fefd=%d\n", fe.get(), fe->ts.readAccess()->fefd);
+	dtdebugf("frontend_monitor pause: {:p}: fefd={:d}", fmt::ptr(fe.get()), fe->ts.readAccess()->fefd);
 
 	return 0;
 }
@@ -160,11 +166,11 @@ int fe_monitor_thread_t::cb_t::pause() {
 
 int fe_monitor_thread_t::cb_t::unpause() {
 	ss::string<64> fe_name;
-	fe_name.sprintf("fe %d.%d", (int)fe->adapter_no, (int)fe->frontend_no);
+	fe_name.format("fe {:d}.{:d}", (int)fe->adapter_no, (int)fe->frontend_no);
 	set_name(fe_name.c_str());
 	log4cxx::MDC::put("thread_name", fe_name.c_str());
 	this->is_paused = false;
-	dtdebugx("frontend_monitor unpause: %p: fefd=%d\n", fe.get(), fe->ts.readAccess()->fefd);
+	dtdebugf("frontend_monitor unpause: {:p}: fefd={:d}\n", fmt::ptr(fe.get()), fe->ts.readAccess()->fefd);
 
 	return 0;
 }
@@ -172,19 +178,19 @@ int fe_monitor_thread_t::cb_t::unpause() {
 
 int fe_monitor_thread_t::run() {
 	ss::string<64> fe_name;
-	fe_name.sprintf("fe %d.%d", (int)fe->adapter_no, (int)fe->frontend_no);
+	fe_name.format("fe {:d}.{:d}", (int)fe->adapter_no, (int)fe->frontend_no);
 	set_name(fe_name.c_str());
 	log4cxx::MDC::put("thread_name", fe_name.c_str());
-
-	dtdebugx("frontend_monitor run: %p: fefd=%d\n", fe.get(), fe->ts.readAccess()->fefd);
+	dtdebugf("frontend_monitor run: {:p}: fefd={:d}\n", fmt::ptr(fe.get()), fe->ts.readAccess()->fefd);
 	auto save = shared_from_this(); // prevent ourself from being deleted until thread exits;
 
 	if (fe->api_type != api_type_t::NEUMO)
 		timer_start(1); // NEUMO api activates heartbeat mode
 	for (;;) {
+
 		auto n = epoll_wait(2000);
 		if (n < 0) {
-			dterrorx("error in poll: %s", strerror(errno));
+			dterrorf("error in poll: {:s}", strerror(errno));
 			continue;
 		}
 		now = system_clock_t::now();
@@ -195,26 +201,31 @@ int fe_monitor_thread_t::run() {
 				}
 			} else if (fe->is_fefd(evt->data.fd)) {
 				handle_frontend_event();
-			} else if (is_timer_fd(evt)) { //only for non-neumo mode
-				if(!is_paused && fe->api_type != api_type_t::NEUMO)
-					monitor_signal();
+			} else if (is_timer_fd(evt)) {
+        /*only for non-neumo mode. In this case events are only reported when a lock status
+					bit changes. In neumo mode, events are sent periodically.
+				*/
+				if(!is_paused && fe->api_type != api_type_t::NEUMO) {
+					auto state = fe->get_lock_status();
+					update_lock_status_and_signal_info(state.fe_status);
+				}
 			}
 		}
 	}
 exit_:
-	{
-		auto w = fe->ts.writeAccess();
-		fe->close_device(*w);
-	}
-	dtdebugx("frontend_monitor end: %p: closed device\n", fe.get());
 	save.reset();
-	{
-		auto ts = fe->signal_monitor.writeAccess();
-		auto &signal_monitor = *ts;
-		signal_monitor.end_stat(receiver);
-	}
-	dtdebugx("frontend_monitor end: %p: fefd=%d\n", fe.get(), fe->ts.readAccess()->fefd);
+	dtdebugf("frontend_monitor end: {:p}: fefd={:d}\n", fmt::ptr(fe.get()), fe->ts.readAccess()->fefd);
 	return 0;
+}
+
+int fe_monitor_thread_t::exit() {
+
+	fe->close_device();
+	dtdebugf("frontend_monitor end: {:p}: closed device\n", fmt::ptr(fe.get()));
+	auto ts = fe->signal_monitor.writeAccess();
+	auto &signal_monitor = *ts;
+	signal_monitor.end_stat(receiver);
+		return 0;
 }
 
 void signal_monitor_t::update_stat(receiver_t& receiver, const signal_info_t& info) {
@@ -315,12 +326,5 @@ Another approach could be the following:
 	2. call DTV_STOP ioctl and a message that tuning can proceed
 
 Ideally the kernel should also set a flag showing "idle mode", but this is not the case
-
-
-
-
-
-
-
 
  */

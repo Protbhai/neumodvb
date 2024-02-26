@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -120,17 +120,17 @@ class LnbNetworkTable(NeumoTable):
         if hasattr(self.parent, "network"):
             self.parent.network = val
 
-    def InitialRecord(self):
-        return self.network
-
     def SetSat(self, sat):
         if self.lnb is None:
+            return self.network
+        if sat is None and len(self.lnb.networks)>0:
+            self.network = self.lnb.networks[0]
             return self.network
         for network in self.lnb.networks:
             if network.sat_pos == sat.sat_pos:
                 self.network = network
                 return self.network
-
+        return self.network
     def screen_getter(self, txn, sort_field):
         """
         txn is not used; instead we use self.lnb
@@ -139,8 +139,9 @@ class LnbNetworkTable(NeumoTable):
 
     def matching_sat(self, sat_pos):
         sats = wx.GetApp().get_sats()
+        sat_band = pydevdb.lnb.sat_band(self.lnb)
         for sat in sats:
-            if abs(sat.sat_pos - sat_pos) < 5:
+            if sat.sat_band == sat_band and abs(sat.sat_pos - sat_pos) < 5:
                 return sat
         return None
 
@@ -203,6 +204,9 @@ class LnbNetworkGrid(NeumoGridBase):
         ])
         self.EnableEditing(self.app.frame.edit_mode)
 
+    def InitialRecord(self):
+        return self.table.network
+
     def SetSat(self, sat):
         self.network = self.table.SetSat(sat)
 
@@ -243,6 +247,13 @@ class LnbNetworkGrid(NeumoGridBase):
         self.app.frame.SetEditMode(True)
         self.EnableEditing(self.app.frame.edit_mode)
         return super().OnNew(evt)
+
+    def CmdNew(self, event):
+        dtdebug("CmdNew")
+        f = wx.GetApp().frame
+        if not f.edit_mode:
+            f.SetEditMode(True)
+        self.OnNew(event)
 
     def OnEditMode(self, evt):
         dtdebug(f'old_mode={self.app.frame.edit_mode}')

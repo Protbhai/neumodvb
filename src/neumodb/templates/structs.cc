@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -47,7 +47,7 @@ namespace {{dbname}} {
 			//this must be a keys_t:: field, not a subfield_t::; this is encoded as 0,0,0, key, with key!=0
 			if(sort_order.fields[1]!=0 || sort_order.fields[2] !=0 || //means
 				 sort_order.fields[3] == 0 ) {
-				dterror("Illegal sort_order none; using default");
+				dterrorf("Illegal sort_order none; using default");
 				return dynamic_key_t((uint8_t) subfield_t::DEFAULT);
 			}
 		return sort_order;
@@ -82,7 +82,7 @@ namespace {{dbname}} {
 			assert (sort_order.fields[1]==0);
 			assert (sort_order.fields[2]==0);
 			if(sort_order.fields[3]==0) {
-				dterror("Illegal sort_order none; using default");
+				dterrorf("Illegal sort_order none; using default");
 				return keys_t::{{struct.primary_key.index_name}};
 			}
 			return keys_t(sort_order.fields[3]);
@@ -140,7 +140,7 @@ namespace {{dbname}} {
 				if(strcmp(subfield_name, "{{field.name}}")==0)
 					return uint32_t(subfield_t::{{field.name.replace('.','_')}});
 			{% endfor %}
-			dterror("Illegal subfield name =" << subfield_name);
+			dterrorf("Illegal subfield name ={}", subfield_name);
 			return uint32_t(subfield_t::none);
 		}
 };
@@ -198,22 +198,36 @@ int deserialize<{{dbname}}::{{struct.class_name}}>(
 			return offset;
 	switch(type_id) {
 		{% for variant_type in f.variant_types %}
-	case data_types::data_type<{{variant_type}}>(): //current type for this field
+	case data_types::data_type<typename std::remove_cvref<{{variant_type.variant_type}}>::type>(): //current type for this field
 	{
-		{{variant_type}} content;
+		{{variant_type.variant_type}} content;
 		offset = deserialize(ser, content, offset);
 		if(offset>=0) {
 			rec.{{f.name}} = content;
 		}
-		return offset;
 	}
 	break;
 	{% endfor %}
 	default:
 		// this field_type does not exist currently and should be ignored
-				return offset+foreign_field.serialized_size;
+		    assert(false);
+				return offset/*+foreign_field.serialized_size*/;
 				break;
 	}
+	}
+	{% elif f.is_optional %}
+	{
+		bool has_val; //is optional present?
+		offset = deserialize(ser, has_val, offset);
+		if(offset<0)
+			return offset;
+		if(has_val) {
+			{{f.scalar_type}} content;
+			offset = deserialize(ser, content, offset);
+			if(offset < 0)
+				return offset;
+				rec.{{f.name}} = content;
+		}
 	}
 	{%else%}
 	offset = deserialize(ser, rec.{{f.name}}, offset);
@@ -235,17 +249,23 @@ int serialized_size<{{dbname}}::{{struct.class_name}}>(
 	int ret = 0;
 	{%for f in struct.fields %}
 	{% if f.is_variant %}
+	ret += sizeof(uint32_t); //size of type_id
 	{
-		auto ret = sizeof(uint32_t);
 		for(;;) {
 		{% for variant_type in f.variant_types %}
-		if (std::holds_alternative<{{variant_type}}>(in.{{f.name}})) {
-			ret += serialized_size(*std::get_if<{{variant_type}}>(&in.{{f.name}}));
+		if (std::holds_alternative<{{variant_type.variant_type}}>(in.{{f.name}})) {
+			ret += serialized_size(*std::get_if<{{variant_type.variant_type}}>(&in.{{f.name}}));
 			break;
 		}
 		{% endfor %}
 		break;
 		}
+	}
+	{% elif f.is_optional %}
+	ret += sizeof(bool); //size of has_val
+	{
+		if(in.{{f.name}})
+			ret += serialized_size(*in.{{f.name}});
 	}
 	{% else %}
 	ret += serialized_size(in.{{f.name}});
@@ -278,6 +298,8 @@ namespace {{dbname}} {
               (uint32_t)
 							{% if f.is_variant %}
 							data_types::variant, //type_id_, uniquely identifies data type
+							{% elif f.is_optional %}
+							data_types::optional, //type_id_, uniquely identifies data type
 							{% else %}
 							data_types::data_type<{{f.namespace}}{{f.scalar_type}}>(), //type_id_, uniquely identifies data type
 							{% endif %}
@@ -540,6 +562,8 @@ int deserialize_field_safe
 		{%endif%}
 		{% if f.is_variant %}
 		data_types::variant; //current type for this field
+		{% elif f.is_optional %}
+		data_types::optional; //current type for this field
 		{% else %}
 		data_types::data_type<{{f.namespace}}{{f.scalar_type}}>(); //current type for this field
     {% endif %}
@@ -551,9 +575,9 @@ int deserialize_field_safe
 				return offset;
 			switch(type_id) {
 				{% for variant_type in f.variant_types %}
-			case data_types::data_type<{{variant_type}}>(): //current type for this field
+			case data_types::data_type<typename std::remove_cvref<{{variant_type.variant_type}}>::type>(): //current type for this field
 			{
-				{{variant_type}} content;
+				{{variant_type.variant_type}} content;
 			  offset = deserialize(ser, content, offset);
 				if(offset>=0) {
 					rec.{{f.name}} = content;
@@ -567,6 +591,19 @@ int deserialize_field_safe
 				return offset+foreign_field.serialized_size;
 				break;
 			}
+			{% elif f.is_optional %}
+			bool has_val;
+			offset = deserialize(ser, has_val, offset);
+			if(offset<0)
+				return offset;
+			if(has_val) {
+				{{f.scalar_type}} content;
+				offset = deserialize(ser, content, offset);
+				if(offset>=0) {
+					rec.{{f.name}} = content;
+				}
+			}
+			return offset;
 			{% else %}
 			if constexpr (data_types::is_builtin_type<{{f.namespace}}{{f.scalar_type}}>()) {
 					//scalar builtin or vector of builtins
@@ -595,7 +632,7 @@ int deserialize_field_safe
 					{%endif%}
 				}
 			}
-			{% endif %} {#is_variant#}
+			{% endif %}
 		} else {
 			{% if f.is_int %}
 			using namespace data_types;
@@ -682,14 +719,19 @@ template<>
 	serialize(out, in.{{f.name}});
 	{%elif f.is_variant%}
 	{
-		for(;;) {
-		{% for variant_type in f.variant_types %}
-		if (std::holds_alternative<{{variant_type}}>(in.{{f.name}})) {
-			serialize(out, *std::get_if<{{variant_type}}>(&in.{{f.name}}));
-			break;
-		}
-		{% endfor %}
-		break;
+		std::visit([&](const auto&val) {
+					uint32_t type_id = data_types::data_type<typename std::remove_cvref<decltype(val)>::type>();
+					serialize(out, type_id);
+					serialize(out, val);
+				}, in.{{f.name}});
+	}
+	{%elif f.is_optional%}
+	{
+		auto& val = in.{{f.name}};
+		bool has_val = !!val;
+		serialize(out, has_val);
+		if(has_val) {
+			serialize(out, *val);
 		}
 	}
 	{%else%}
@@ -700,8 +742,7 @@ template<>
 
 /*!{{struct.class_name}} encoding code
  */
-template<>
- void encode_ascending<{{dbname}}::{{struct.class_name}}>(
+ void encode_ascending(
 	ss::bytebuffer_ &ser, const {{dbname}}::{{struct.class_name}}& in)  {
 	using namespace {{dbname}};
 	{% if struct.is_table %}
@@ -711,6 +752,21 @@ template<>
 	  for(const auto& v: in.{{f.name}}) {
 		  encode_ascending(ser, v);
 	  }
+	  {%- elif f.is_variant %}
+		std::visit([&ser](const auto& val) {
+			uint32_t type_id = data_types::data_type<typename std::remove_cvref<decltype(val)>::type>();
+			encode_ascending(ser, type_id);
+		  encode_ascending(ser, val);
+	  }, in.{{f.name}});
+	  {%- elif f.is_optional %}
+		{
+			auto &val = in.{{f.name}};
+			bool has_val = !!val;
+			encode_ascending(ser, has_val);
+			if(has_val) {
+				encode_ascending(ser, *val);
+			}
+		}
 	  {%- else %}
 	  encode_ascending(ser, in.{{f.name}});
 	  {% endif %}
@@ -721,12 +777,26 @@ template<>
 	  for(const auto& v: in.{{f.name}}) {
 		  encode_ascending(ser, v);
 	  }
-	  {%- else %}
-	  encode_ascending(ser, in.{{f.name}});
-	  {% endif %}
+	  {%- elif f.is_variant %}
+		std::visit([&ser](const auto& val) {
+			uint32_t type_id = data_types::data_type<typename std::remove_cvref<decltype(val)>::type>();
+			encode_ascending(ser, type_id);
+		  encode_ascending(ser, val);
+	  }, in.{{f.name}});
+	  {%- elif f.is_optional %}
+		{
+			auto& val = in.{{f.name}};
+			bool has_val = !!val;
+			encode_ascending(ser, has_val);
+			if(has_val)
+				encode_ascending(ser, *val);
+		}
+		{%- else %}
+			encode_ascending(ser, in.{{f.name}});
+			{% endif %}
 	  {%endfor %}
 	 {% endif %}
-};
+}
 
 
 {% if struct.is_table %}
@@ -738,7 +808,9 @@ template<>
 void {{dbname}}::encode_subfields<{{dbname}}::{{struct.class_name}}>(
 	ss::bytebuffer_ &out, const {{dbname}}::{{struct.class_name}}& in,
 	const ss::vector_<uint8_t>&subfields)  {
+#ifndef NDEBUG
 	int count =0;
+#endif
 	for(auto field_: subfields) {
 		/*Prevent long keys from being generated in the first place
 			An example occurs when sorting lnbs by network. IN one example the key size is 594 because
@@ -757,23 +829,7 @@ void {{dbname}}::encode_subfields<{{dbname}}::{{struct.class_name}}>(
 	{%for f in struct.subfields %}
 	{% if f.is_variant %}
 	assert(0); //Implementation error. Fields of variants cannot be used as indices (fields not always available)
-	{% if false %}
-		case {{struct.class_name}}::subfield_t::{{f.name.replace('.','_')}}:
-			{
-		auto ret = sizeof(uint32_t);
-		for(;;) {
-		{% for variant_type in f.variant_types %}
-		if (std::holds_alternative<{{variant_type}}>(in.{{f.name}})) {
-			auto& content = *std::get_if<{{variant_type}}>(&in.{{f.name}});
-			encode_subfields<{{variant_type}}>(content);
-			break;
-		}
-		{% endfor %}
-		break;
-		}
-	}
- {% endif %}
-		break;
+	break;
 	{% else %}
 		case {{struct.class_name}}::subfield_t::{{f.name.replace('.','_')}}:
 		{% if f.is_string%}
@@ -796,7 +852,9 @@ void {{dbname}}::encode_subfields<{{dbname}}::{{struct.class_name}}>(
 		default:
 			assert(0);
 		}
+#ifndef NDEBUG
 		count++;
+#endif
 	}
 };
 {% endif %}
@@ -1065,7 +1123,7 @@ namespace {{dbname}} {
 
 		switch(order) {
 		default:
-			dterrorx("Illegal key: %d; using default instead", (int)order);
+			dterrorf("Illegal key: {:d}; using default instead", (int)order);
 			prefix =  {{struct.class_name}}::partial_keys_t::none;
 		{% for key in struct.keys %}
 		// key {{key.index_name}}
@@ -1082,7 +1140,7 @@ namespace {{dbname}} {
 				if (prefix=={{struct.class_name}}::partial_keys_t::none)
 					break;
 				if(ref == nullptr) {
-					dterror("ref parameter must be specified");
+					dterrorf("ref parameter must be specified");
 					assert(0);
 				}
 				{% for prefix in key.key_prefixes | reverse %}
@@ -1100,7 +1158,7 @@ namespace {{dbname}} {
 		    {%endfor%}
 			if(prefix == {{struct.class_name}}::partial_keys_t::all)
 				break;
-				dterror("illegal prefix for this call");
+				dterrorf("illegal prefix for this call");
 				assert(0);
 			 }
 			 break;
@@ -1116,7 +1174,7 @@ namespace {{dbname}} {
 					break;
 			}
 			if(i<0) {
-				dterrorx("Implementation error");
+				dterrorf("Implementation error");
 			}
 		}
 		return out;
@@ -1152,7 +1210,7 @@ namespace {{dbname}} {
 					break;
 			}
 			if(i<0) {
-				dterrorx("Implementation error");
+				dterrorf("Implementation error");
 			}
 		}
 		return out;
@@ -1185,7 +1243,7 @@ namespace {{dbname}} {
 					break;
 			}
 			if(i<0) {
-				dterrorx("Implementation error");
+				dterrorf("Implementation error");
 			}
 		}
 		return out;
@@ -1205,7 +1263,7 @@ namespace {{dbname}} {
   {% for f in struct.subfields -%} {{f.name}},  {%- endfor %}
 	 */
 	inline bool matches(const {{struct.class_name}}& a, const {{struct.class_name}}& b,
-												 const ss::vector<field_matcher_t>& field_matchers) {
+												 const ss::vector_<field_matcher_t>& field_matchers) {
 		for(const auto & fm: field_matchers) {
 			switch({{struct.class_name}}::subfield_t(fm.field_id)) {
 			case {{struct.class_name}}::subfield_t::none:
@@ -1236,7 +1294,11 @@ namespace {{dbname}} {
 				{%if f.is_string -%}
 			case field_matcher_t::match_type_t::STARTSWITH:
 				if(strncasecmp(a.{{f.name}}.c_str(), b.{{f.name}}.c_str(),
-									 b.{{f.name}}.size()) !=0)
+									 b.{{f.name}}.size()) != 0)
+					return false;
+				break;
+			case field_matcher_t::match_type_t::CONTAINS:
+				if(strcasestr(a.{{f.name}}.c_str(), b.{{f.name}}.c_str()) == nullptr)
 					return false;
 				break;
 				{%else%}
@@ -1367,13 +1429,16 @@ void screen_t<{{dbname}}::{{struct.class_name}}>::fill_list_db
 		monitor.auxiliary_reference.row_number = -1; //reset
 	}
 	assert(match_data || field_matchers.size()==0);
+	assert(match_data2 || field_matchers2.size()==0);
 
 	ss::bytebuffer_& start_key = limits.key_lower_limit;
 #ifdef USE_END_TIME
 	ss::bytebuffer_& end_key = limits.key_upper_limit;
 #endif
-	auto some_match_fn = [&field_matchers, &match_data](const {{struct.class_name}}& record) {
-		return matches(record, *match_data, field_matchers);
+	auto some_match_fn = [&field_matchers, &field_matchers2, &match_data, &match_data2](
+		const {{struct.class_name}}& record) {
+		return (!match_data || matches(record, *match_data, field_matchers)) &&
+			(!match_data2 || matches(record, *match_data2, field_matchers2));
 	};
 
 	auto all_match_fn = [](const {{struct.class_name}}& record) {
@@ -1388,7 +1453,7 @@ void screen_t<{{dbname}}::{{struct.class_name}}>::fill_list_db
 																																					find_type_t::find_geq);
 			c.set_key_prefix(limits.key_prefix);
 
-			if(field_matchers.size() ==0)
+			if(!match_data && !match_data2)
 			{{struct.name}}::fill_list_db_(txn, pos_top,
 																		 all_match_fn,
 #ifdef USE_END_TIME
@@ -1415,7 +1480,7 @@ void screen_t<{{dbname}}::{{struct.class_name}}>::fill_list_db
 																																							find_type_t::find_geq);
 			c.set_key_prefix(limits.key_prefix);
 
-			if(field_matchers.size() ==0)
+			if(!match_data && !match_data2)
 			{{struct.name}}::fill_list_db_(txn, pos_top,
 																		 all_match_fn,
 #ifdef USE_END_TIME

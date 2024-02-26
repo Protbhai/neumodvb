@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -73,7 +73,7 @@ class SatListComboCtrl(wx.ComboCtrl):
         self.example = 'All Satellites'+' '*4
         self.font_dc =  wx.ScreenDC()
         self.font = self.GetFont()
-        self.font.SetPointSize(self.font.GetPointSize()+6)
+        #self.font.SetPointSize(self.font.GetPointSize()+6)
         self.SetFont(self.font)
         self.font_dc.SetFont(self.font) # for estimating label sizes
         self.popup = GridPopup(SatGridPopup)
@@ -102,7 +102,6 @@ class SatListComboCtrl(wx.ComboCtrl):
         if self.sat is None:
             return "All satellites" if self.allow_all else ""
         return str(self.sat.name if len(self.sat.name)>0 else str(self.sat))
-
 
     def show_all(self):
         """

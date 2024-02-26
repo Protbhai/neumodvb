@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -29,9 +29,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "date/date.h"
-#include "date/iso_week.h"
-#include "date/tz.h"
+#include <fmt/chrono.h>
 #include "log4cxx/consoleappender.h"
 #include "log4cxx/propertyconfigurator.h"
 #include "log4cxx/xml/domconfigurator.h"
@@ -46,8 +44,6 @@
 using namespace log4cxx;
 using namespace log4cxx::xml;
 using namespace log4cxx::helpers;
-using namespace date;
-using namespace date::clock_cast_detail;
 
 #include <ctime>
 #include <iomanip>
@@ -91,23 +87,6 @@ template <class... Durations, class DurationIn> std::tuple<Durations...> break_d
 													(d -= std::chrono::duration_cast<DurationIn>(std::get<Durations>(retval))))),
 										0)...};
 	return retval;
-}
-
-std::ostream& operator<<(std::ostream& os, const std::chrono::duration<long, std::ratio<1, 1000000000>>& duration) {
-
-	auto x =
-		break_down_durations<std::chrono::hours, std::chrono::minutes, std::chrono::seconds, std::chrono::nanoseconds>(
-			duration);
-	std::stringstream frac;
-	frac << std::fixed << std::setprecision(3) << float(1e-9 * std::get<3>(x).count());
-	std::string str = frac.str();
-	return os << std::setfill('0') << std::setw(2) << std::get<0>(x).count() << ":" << std::get<1>(x).count() << ":"
-						<< std::get<2>(x).count() << str.substr(1, str.length() - 1);
-}
-
-std::ostream& std::operator<<(std::ostream& os, system_time_t t) {
-	os << date::format("_%Y%m%d_%H:%M:%S", zoned_time(date::current_zone(), std::chrono::floor<std::chrono::seconds>(t)));
-	return os;
 }
 
 LoggerPtr mainlogger = create_log("main");

@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -77,9 +77,19 @@ struct tune_confirmation_t {
 	}
 };
 
-
+enum class fem_state_t {
+	IDLE,                  //fe_monitor is not executing any tuning/spectral acq... command
+	STARTED,               //fe_monitor is starting
+	FAILED,               //fe_monitor has encountered a tuning error
+	POSITIONER_MOVING,     //Positioner has started moving
+	SEC_POWERED_UP,        //Sufficient time has passed for all diseqc devices and lnb to be powered up
+	                       //and positioner to move, and tuning, spectral acq... has started
+	MONITORING,            //ioctl returned, we are not monitorin
+};
 
 struct fe_lock_status_t {
+	fem_state_t fem_state;
+	int tune_time_ms; //
 	bool lock_lost{false}; //
 	fe_status_t fe_status{};
 	int16_t matype{-1};
@@ -115,7 +125,7 @@ struct fe_lock_status_t {
 		}
 		return is_locked() && matype >=0 && // otherwise we do not know matype yet
 			(matype == 256 || //dvbs
-			 (matype >> 6) == 3); //not a transport stream
+			 (matype >> 6) == 3); //a transport stream
 		}
 };
 
@@ -160,4 +170,10 @@ struct signal_info_t {
 	~signal_info_t() {
 		//printf("signal_info destroyed %p\n");
 	}
+};
+
+struct positioner_motion_report_t {
+	devdb::dish_t dish;
+	time_t start_time{-1};
+	time_t end_time{-1};
 };

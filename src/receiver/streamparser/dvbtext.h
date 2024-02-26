@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -29,4 +29,4 @@ namespace ss {
 	struct string_;
 };
 
-int decodeText(ss::string_& out, const uint8_t* from, int len);
+int decode_text(ss::string_& out, uint8_t* from, int len);

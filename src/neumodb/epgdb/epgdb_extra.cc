@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -20,17 +20,10 @@
 #include "util/dtassert.h"
 #include "epgdb_extra.h"
 #include "../chdb/chdb_extra.h"
-#include "date/date.h"
-#include "date/iso_week.h"
-#include "date/tz.h"
-#include "xformat/ioformat.h"
-//#include <iosfwd>
+#include "fmt/chrono.h"
 #include "neumodb/db_keys_helper.h"
 #include "neumotime.h"
-#include "stackstring/ssaccu.h"
 
-using namespace date;
-using namespace date::clock_cast_detail;
 using namespace epgdb;
 
 /*
@@ -72,7 +65,7 @@ void epgdb::clean(db_txn& txnepg, system_time_t start_time) {
 	}
 	auto t = dttime(-1);
 	txnepg.use_log = use_log;
-	dtdebugx("Cleaned epg: %d milliseconds", t);
+	dtdebugf("Cleaned epg: {} milliseconds", t);
 }
 
 /*compute duration of overlapping part between [a1,a2] and [b1,b2]
@@ -143,19 +136,18 @@ std::optional<epgdb::epg_record_t> epgdb::best_matching(db_txn& txnepg, const ep
 
 std::optional<epgdb::epg_record_t> epgdb::running_now(db_txn& txnepg, const chdb::service_key_t& service_key,
 																											time_t now) {
-	epg_service_t s(service_key.mux.sat_pos, service_key.network_id, service_key.ts_id, service_key.service_id);
 	// const int tolerance = 30*60;
 	/*
 		find a record with start time equal to now, or the closest earlier start_time if none exists
 	*/
-	auto c = epgdb::epg_record_t::find_by_key(txnepg, s, now /* - tolerance*/, find_leq,
+	auto c = epgdb::epg_record_t::find_by_key(txnepg, service_key, now /* - tolerance*/, find_leq,
 																						epgdb::epg_record_t::partial_keys_t::service);
-	if (c.is_valid() && c.current().k.service != s)
+	if (c.is_valid() && c.current().k.service != service_key)
 		c.next(); // the current service has no records, or no records old enough
 	if (c.is_valid())
 		for (const auto& rec : c.range()) {
 
-			if (rec.k.service != s) {
+			if (rec.k.service != service_key) {
 				assert(0);
 				break; // we passed the current service
 			}
@@ -179,38 +171,27 @@ std::optional<epgdb::epg_record_t> epgdb::running_now(db_txn& txnepg, const chdb
 
 std::optional<chdb::service_t> epgdb::service_for_epg_record(db_txn& txn, const epgdb::epg_record_t& epg_record) {
 	using namespace chdb;
-	/*
-		Note that epg_record.k.service.sat_pos could be wrong, because sat_pos relates to the satellite
-		on which the epg record was found. Sometimes satellites report epg for muxes on other satellites.
-
-		@todo: this could be solved by maintaing a database table which maps network_id to multiple satellites.
-		In case the code below finds no service, we repeat the search below, for all possible values
-		of sat_id found.
-
-		Alternatively,  mux could contain an index mapping network_id, ts_id to (one or more) satellites.
-	*/
-
-	// we do can not included k.mux.t2mi_pid and k.mux.extra_id in the serch, so we use a loop
-	auto c = service_t::find_by_network_id_ts_id_service_id_sat_pos
-		(txn, epg_record.k.service.network_id, epg_record.k.service.ts_id, epg_record.k.service.service_id,
-		 epg_record.k.service.sat_pos, find_type_t::find_eq, service_t::partial_keys_t::network_id_ts_id_service_id_sat_pos);
+	const auto& service_key = epg_record.k.service;
+	auto c = chdb::service_t::find_by_key(txn, service_key.mux, service_key.service_id);
 	if(c.is_valid())
 		return c.current();
 	return {}; // no result
 }
 
-std::unique_ptr<epg_screen_t> epgdb::chepg_screen(db_txn& txnepg, const chdb::service_key_t& service_key,
+std::unique_ptr<epg_screen_t> epgdb::chepg_screen(db_txn& txnepg,
+																									std::shared_ptr<neumodb_t> tmpdb, uint32_t sort_order,
+																									const chdb::service_key_t& service_key,
 																									time_t start_time,
 #ifdef USE_END_TIME
 																									time_t end_time,
 #endif
-																									uint32_t sort_order, std::shared_ptr<neumodb_t> tmpdb) {
+																									const ss::vector_<field_matcher_t>* field_matchers_,
+																									const epgdb::epg_record_t* match_data_,
+																									const ss::vector_<field_matcher_t>* field_matchers2_,
+																									const epgdb::epg_record_t* match_data2_) {
 	auto start_time_ = system_clock_t::from_time_t(start_time);
 	epg_record_t prefix;
-	prefix.k.service.sat_pos = service_key.mux.sat_pos;
-	prefix.k.service.network_id = service_key.network_id;
-	prefix.k.service.ts_id = service_key.ts_id;
-	prefix.k.service.service_id = service_key.service_id;
+	prefix.k.service = service_key;
 	auto cur = running_now(txnepg, service_key, start_time_);
 	prefix.k.start_time = cur ? cur->k.start_time : start_time;
 	auto lower_limit = prefix;
@@ -227,12 +208,18 @@ std::unique_ptr<epg_screen_t> epgdb::chepg_screen(db_txn& txnepg, const chdb::se
 		tmpdb->open_temp("/tmp/neumolists");
 	}
 
-	return std::make_unique<epg_screen_t>(txnepg, tmpdb, sort_order, epg_record_t::partial_keys_t::service, &prefix,
-																				&lower_limit
+	return std::make_unique<epg_screen_t>(txnepg, tmpdb, sort_order,
+																				epg_record_t::partial_keys_t::service,
+																				&prefix,
+																				&lower_limit,
 #ifdef USE_END_TIME
-																				,
-																				upper_limit
+																				upper_limit,
 #endif
+																				field_matchers_,
+																				match_data_,
+																				field_matchers2_,
+																				match_data2_
+
 		);
 }
 
@@ -241,12 +228,12 @@ void epgdb::gridepg_screen_t::remove_service(const chdb::service_key_t& service_
 		if (e.service_key == service_key) {
 			bool del = 1;
 			if (e.epg_screen) {
-				dtdebug("GRID: remove epg for " << service_key);
+				dtdebugf("GRID: remove epg for {}", service_key);
 				e.epg_screen->drop_temp_table(del);
 				e.epg_screen.reset();
 				e.service_key = chdb::service_key_t();
 			} else {
-				dterror("GRID: attempting to remove non-existing epgscreen for " << service_key);
+				dterrorf("GRID: attempting to remove non-existing epgscreen for {}", service_key);
 			}
 		}
 	}
@@ -271,7 +258,7 @@ epgdb::epg_screen_t* epgdb::gridepg_screen_t::add_service(db_txn& txnepg, const 
 			std::shared_ptr<neumodb_t> new_tmpdb = std::make_shared<epgdb_t>(*tmpdb);
 			new_tmpdb->add_dynamic_key(dynamic_key_t(this->epg_sort_order));
 			ss::string<32> name;
-			name.sprintf("%p", new_tmpdb.get());
+			name.format("{:p}", fmt::ptr(new_tmpdb.get()));
 			new_tmpdb->open_secondary(name.c_str());
 			return new_tmpdb;
 		} else {
@@ -285,67 +272,50 @@ epgdb::epg_screen_t* epgdb::gridepg_screen_t::add_service(db_txn& txnepg, const 
 	for (auto& e : entries) {
 		if (e.epg_screen.get() == nullptr) {
 			e.service_key = service_key;
-			dtdebug("GRID: add epg for " << service_key);
-			e.epg_screen = chepg_screen(txnepg, service_key, start_time_,
+			dtdebugf("GRID: add epg for {}", service_key);
+			e.epg_screen = chepg_screen(txnepg,
+																	make_db(), epg_sort_order,
+																	service_key, start_time_
 #ifdef USE_END_TIME
-																	end_time_,
+																	, end_time_
 #endif
-																	epg_sort_order, make_db());
+				);
 			return e.epg_screen.get();
 		}
 	}
 	auto& e = entries.emplace_back(service_key);
-	dterror("GRID: add epg for " << service_key);
-	e.epg_screen = chepg_screen(txnepg, service_key, start_time_,
+	dterrorf("GRID: add epg for {}", service_key);
+	e.epg_screen = chepg_screen(txnepg,
+															make_db(),
+															epg_sort_order,
+															service_key, start_time_
 #ifdef USE_END_TIME
-															end_time_,
+															, end_time_
 #endif
-															epg_sort_order, make_db());
+		);
 	return e.epg_screen.get();
 }
 
-std::ostream& epgdb::operator<<(std::ostream& os, const epg_source_t& s) {
+fmt::format_context::iterator
+fmt::formatter<epg_source_t>::format(const epg_source_t& s, format_context& ctx) const
+{
 	auto sat = chdb::sat_pos_str(s.sat_pos);
-	stdex::printf(os, "%s - nid=%d tsid=%d %s[%d]", sat.c_str(), s.network_id, s.ts_id, enum_to_str(s.epg_type),
-								(int)s.table_id);
-	return os;
+	return fmt::format_to(ctx.out(), "{:s} - nid={:d} tsid={:d} {:s}[{:d}]",
+												sat.c_str(), s.network_id, s.ts_id, to_str(s.epg_type),
+												(int)s.table_id);
 }
 
-std::ostream& epgdb::operator<<(std::ostream& os, const epg_service_t& s) {
-	auto sat = chdb::sat_pos_str(s.sat_pos);
-	stdex::printf(os, "%s ts=%d sid=%d", sat.c_str(), s.ts_id, s.service_id);
-	return os;
-}
-std::ostream& epgdb::operator<<(std::ostream& os, const epg_key_t& k) {
-	os << k.service;
-	stdex::printf(os, " [%d] ", k.event_id);
-	os << date::format("%F %H:%M", zoned_time(current_zone(), system_clock::from_time_t(k.start_time)));
-	return os;
+fmt::format_context::iterator
+fmt::formatter<epg_key_t>::format(const epg_key_t& k, format_context& ctx) const {
+	return fmt::format_to(ctx.out(), "{} [{:d}] {:%F %H:%M}", k.service, k.event_id, fmt::localtime(k.start_time));
 }
 
-std::ostream& epgdb::operator<<(std::ostream& os, const epg_record_t& epg) {
-	os << epg.k;
-	os << date::format(" - %H:%M", zoned_time(current_zone(), system_clock::from_time_t(epg.end_time)));
-	auto rec_status = enum_to_str(epg.rec_status);
-	stdex::printf(os, ":%s %s", rec_status, epg.event_name.c_str());
 
-	return os;
+fmt::format_context::iterator
+fmt::formatter<epg_record_t>::format(const epg_record_t& epg, format_context& ctx) const {
+	return fmt::format_to(ctx.out(), "{} - {:%H:%M}:{} {}", epg.k, fmt::localtime(epg.end_time),
+												to_str(epg.rec_status), epg.event_name);
 }
-
-void epgdb::to_str(ss::string_& ret, const epg_service_t& s) { ret << s; }
-
-void epgdb::to_str_brief(ss::string_& ret, const epg_record_t& epg) {
-	auto os = ret << date::format("%H:%M", zoned_time(current_zone(), system_clock::from_time_t(epg.k.start_time)));
-	os << date::format(" - %H:%M", zoned_time(current_zone(), system_clock::from_time_t(epg.end_time)));
-	auto rec_status = enum_to_str(epg.rec_status);
-	stdex::printf(os, ":%s%s", rec_status, epg.event_name.c_str());
-}
-
-void epgdb::to_str(ss::string_& ret, const epg_key_t& k) { ret << k; }
-
-void epgdb::to_str(ss::string_& ret, const epg_record_t& r) { ret << r; }
-
-void epgdb::to_str(ss::string_& ret, const epg_source_t& s) { ret << s; }
 
 /*!
 	returns true if update or new record was found
@@ -414,7 +384,11 @@ static bool save_epg_record_if_better_(db_txn& txnepg, const epgdb::epg_record_t
 #endif
 						put_record(txnepg, record);
 					} else { // record will be updated
+#if 0
 						put_record_at_key(c, c.current_serialized_primary_key(), record);
+#else
+						update_record_at_cursor(c, record);
+#endif
 					}
 					return true;
 				}
@@ -446,4 +420,27 @@ bool epgdb::save_epg_record_if_better_update_input(db_txn& txnepg, epgdb::epg_re
 bool epgdb::save_epg_record_if_better(db_txn& txnepg, const epgdb::epg_record_t& record) {
 	auto update_input = [](const epgdb::epg_record_t& old) {};
 	return save_epg_record_if_better_(txnepg, record, update_input);
+}
+
+
+
+/*
+	Update the recording status of epg record, but leave the rest of the record alone.
+	This is used to show on the epg screens
+*/
+bool epgdb::update_epg_recording_status(db_txn& epgdb_wtxn, const epgdb::epg_record_t& epgrec) {
+	assert( (epgrec.k.event_id == TEMPLATE_EVENT_ID) == epgrec.k.anonymous);
+
+	auto c = epgdb::epg_record_t::find_by_key(epgdb_wtxn, epgrec.k);
+	assert(c.is_valid());
+	if(!c.is_valid())
+		return true;
+	auto existing = c.current();
+	if (existing.rec_status != epgrec.rec_status) {
+		assert(existing.k.anonymous == (existing.k.event_id == TEMPLATE_EVENT_ID));
+		existing.rec_status = epgrec.rec_status;
+		assert (!existing.k.anonymous);
+		epgdb::update_record_at_cursor(c, existing);
+	}
+	return false;
 }

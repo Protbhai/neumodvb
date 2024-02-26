@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -16,7 +16,6 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 #
-
 from functools import lru_cache
 import wx
 import wx.grid
@@ -30,7 +29,7 @@ import datetime
 from dateutil import tz
 import regex as re
 from inspect import currentframe
-
+from packaging import version
 from neumodvb.util import dtdebug, dterror, get_text_extent, setup, lastdot, wxpythonversion, wxpythonversion42
 from neumodvb import neumodbutils
 
@@ -40,7 +39,7 @@ import pychdb
 import pyrecdb
 import pystatdb
 
-is_old_wx = float('.'.join(wx.version().split(' ')[-1].split('.')[:-1])) <=3.1
+is_old_wx = version.parse(wx.version().split(' ')[-1]) <= version.parse("3.1")
 
 def lnb_network_str(lnb_networks):
     return '; '.join([ pychdb.sat_pos_str(network.sat_pos) for network in lnb_networks])
@@ -54,7 +53,7 @@ def NeumoGetBestSize(self, grid, attr, dc, row, col):
     return wx.Size(w, h)
 
 #path buggy wxpython code to fix extra space at end
-wx.grid.GridCellAutoWrapStringRenderer.GetBestSize = NeumoGetBestSize
+#wx.grid.GridCellAutoWrapStringRenderer.GetBestSize = NeumoGetBestSize
 
 class screen_if_t(object):
     def __init__(self, screen, invert_rows):
@@ -130,8 +129,8 @@ class NeumoChoiceEditor(wx.grid.GridCellChoiceEditor):
             choices= self.col.cfn(table)
         elif self.col.key.endswith('_pos'):
             #recompute each time, because data may have changed
-            sats = wx.GetApp().get_sats()
-            choices= [str(x) for x in sats]
+            sats = wx.GetApp().get_sat_poses()
+            choices= [pychdb.sat_pos_str(x) for x in sats]
         elif self.col.key.endswith('adapter_mac_address'):
             #recompute each time, because data may have changed
             d = wx.GetApp().get_adapters()
@@ -228,7 +227,8 @@ class IconRenderer(wx.grid.GridCellRenderer):
             icon['x'] = x
             x += icon['w'] + xspace
         return icons
-
+    def GetBestSize(self, grid, attr, dc, row, col):
+        return wx.Size(5, 5)
     def Draw(self, grid, attr, dc, rect, rowno, colno, isSelected):
         self.rect_width = rect.width
         #this is a list of tuples: (icon, draw_or_not)
@@ -552,9 +552,6 @@ class NeumoTable(NeumoTableBase):
 
     all_columns = []
 
-    def InitialRecord(self):
-        return None
-
     def __init__(self, parent, basic=False, db_t=None, record_t=None,
                  data_table = None, screen_getter = None,
                  initial_sorted_column = None,
@@ -619,11 +616,10 @@ class NeumoTable(NeumoTableBase):
     def DeleteRows(self, pos=0, numRows=1, updateLabels=True):
         return True
 
-    def GetNumberRows(self, ignore_editing_record=False):
+    def GetNumberRows(self):
         if self.screen is None:
             return 0
-        return (self.screen.list_size + 1)  if (self.screen.has_editing_record and not ignore_editing_record) \
-            else self.screen.list_size
+        return self.screen.list_size + len(self.new_rows)
 
 
     @lru_cache(maxsize=30) #cache the last row, because multiple columns will lookup same row
@@ -650,7 +646,7 @@ class NeumoTable(NeumoTableBase):
             coltype = type(neumodbutils.get_subfield(self.record_t(), col.key))
             matchtype = pydevdb.field_matcher.match_type.EQ
             if coltype == str:
-                matchtype = pydevdb.field_matcher.match_type.STARTSWITH
+                matchtype = pydevdb.field_matcher.match_type.CONTAINS
             m = pydevdb.field_matcher.field_matcher(self.data_table.subfield_from_name(col.key),
                                                        matchtype)
 
@@ -740,9 +736,9 @@ class NeumoTable(NeumoTableBase):
                     self.parent.SelectRecord(last.oldrecord)
                     self.parent.ForceRefresh()
                 assert last.oldrow < self.GetNumberRows()
-                assert last.oldrow == self.row_being_edited
-                self.record_being_edited = last.oldrecord
-                #self.data[last.oldrow] = last.oldrecord
+                if self.row_being_edited is not None:
+                    assert last.oldrow == self.row_being_edited
+                    self.record_being_edited = last.oldrecord
                 return 0
             elif last.operation == 'new':
                 assert type(last) is not list
@@ -849,7 +845,7 @@ class NeumoTable(NeumoTableBase):
             self.parent.ForceRefresh()
 
     def new_row(self):
-        rowno = self.GetNumberRows(ignore_editing_record=True)
+        rowno = self.GetNumberRows()
         self.selected_row = rowno
         rec = self.__new_record__()
         #self.data[n] = rec
@@ -875,6 +871,7 @@ class NeumoTable(NeumoTableBase):
                 sort_columns = [ self.columns[colno].key ]
 
             self.sort_colno = colno
+            key = self.columns[colno].key
             if self.sort_columns[0: len(sort_columns)] == sort_columns:
                 self.sort_order = 1 if self.sort_order != 1 else 2
                 #need_refresh = (self.sort_order !=2)
@@ -884,7 +881,7 @@ class NeumoTable(NeumoTableBase):
                 if len(self.sort_columns) > 4:
                     #keep newest 4 items; very newest is in front
                     self.sort_columns= self.sort_columns[:4]
-                self.sort_order = 1
+                self.sort_order = 2 if key.endswith('time') else 1
         if need_new_data:
             self.__get_data__()
         self.screen.invert_rows = self.sort_order == 2
@@ -902,7 +899,7 @@ class NeumoTable(NeumoTableBase):
                     sort_columns = [ self.columns[colno].key ]
 
                 self.sort_colno = colno
-                self.sort_order = 2 if key.endswith('_time') else 1
+                self.sort_order = 2 if key.endswith('time') else 1
         except:
             pass
 
@@ -958,7 +955,6 @@ class NeumoGridBase(wx.grid.Grid, glr.GridWithLabelRenderersMixin):
             self.SetDefaultCellBackgroundColour(wx.Colour('black'))
             self.SetDefaultCellTextColour(wx.Colour('white'))
         self.col_select_mode = False
-        self.grid_specific_menu_items=[]
         self.infow = None
         self.coloured_rows= set()
         glr.GridWithLabelRenderersMixin.__init__(self)
@@ -1006,7 +1002,6 @@ class NeumoGridBase(wx.grid.Grid, glr.GridWithLabelRenderersMixin):
 
         self.HideRowLabels()
         #self.SetDefaultCellBackgroundColour('yellow')
-        #self.Bind ( wx.EVT_WINDOW_DESTROY, self.OnDestroyWindow )
         self.Bind ( wx.EVT_WINDOW_CREATE, self.OnWindowCreate )
         self.Parent.Bind ( wx.EVT_SHOW, self.OnShowHide )
         self.Bind ( wx.grid.EVT_GRID_SELECT_CELL, self.OnGridCellSelect)
@@ -1019,8 +1014,10 @@ class NeumoGridBase(wx.grid.Grid, glr.GridWithLabelRenderersMixin):
         self.SetColLabelSize(self.GetColLabelSize() + extrasize)
         self.Bind(wx.grid.EVT_GRID_LABEL_RIGHT_CLICK, self.OnColumnMenu)
         self.Bind(wx.grid.EVT_GRID_CELL_RIGHT_CLICK, self.OnColumnMenu)
-
         self.Bind(wx.grid.EVT_GRID_LABEL_LEFT_CLICK, self.OnToggleSort)
+
+    def InitialRecord(self):
+        return None
 
     def sync_rows(self):
         """
@@ -1157,6 +1154,19 @@ class NeumoGridBase(wx.grid.Grid, glr.GridWithLabelRenderersMixin):
             editor = NeumoChoiceEditor(col=col, choices=choices, allowOthers=False)
         elif col.key == 'icons':
             renderer = self.icon_renderer
+        elif col.key in ('networks',):
+            editor = None
+            readonly = True
+            renderer = wx.grid.GridCellAutoWrapStringRenderer()
+        elif col.key in ('connections',):
+            editor = None
+            readonly = True
+            renderer = wx.grid.GridCellAutoWrapStringRenderer()
+        elif col.key.endswith('story'):
+            editor = None
+            renderer = wx.grid.GridCellAutoWrapStringRenderer()
+        elif col.key.endswith('lang'):
+            readonly = True
         elif not readonly:
             if neumodbutils.is_enum(coltype):
                 #see https://stackoverflow.com/questions/54843888/wxpython-how-to-set-an-editor-for-a-column-of-a-grid
@@ -1166,18 +1176,8 @@ class NeumoGridBase(wx.grid.Grid, glr.GridWithLabelRenderersMixin):
                 #editor = wx.grid.GridCellEnumEditor(choices="off,on")
                 editor = wx.grid.GridCellBoolEditor()
                 pass
-            elif col.key in ('networks',):
-                editor = None
-                readonly = True
-                renderer = wx.grid.GridCellAutoWrapStringRenderer()
-            elif col.key in ('connections',):
-                editor = None
-                readonly = True
-                renderer = wx.grid.GridCellAutoWrapStringRenderer()
-            elif col.key.endswith('lang'):
-                readonly = True
             elif issubclass(coltype, numbers.Integral):
-                if col.key.endswith('time'):
+                if col.key == 'mtime':
                     readonly = True
                 elif col.key.endswith('frequency') or col.key.startswith('freq_') or col.key.startswith('lof_'):
                     editor = NeumoFloatEditor(col, precision=3)
@@ -1327,10 +1327,15 @@ class NeumoGridBase(wx.grid.Grid, glr.GridWithLabelRenderersMixin):
             self.infow.ShowRecord(self.table, rec)
 
     def OnGridCellSelect(self, evt):
+        has_selection = any(True for _ in self.GetSelectedBlocks())
+
         if self.table.row_being_edited is not None and evt.GetRow() != self.table.row_being_edited:
             self.OnRowSelect(evt.GetRow())
             #if len(self.table.unsaved_edit_undo_list) > 0:
             wx.CallAfter(self.table.SaveModified)
+        elif has_selection and self.table.row_being_edited is None:
+            self.OnRowSelect(evt.GetRow())
+            return #This can be a multi-row selection event (pressing control key)
         elif evt.GetRow() != self.GetGridCursorRow():
             self.OnRowSelect(evt.GetRow())
         else:
@@ -1344,7 +1349,7 @@ class NeumoGridBase(wx.grid.Grid, glr.GridWithLabelRenderersMixin):
             return
         self.created = True
         self.Parent.Bind(wx.EVT_SHOW, self.OnShow)
-        rec = self.table.InitialRecord()
+        rec = self.InitialRecord()
         self.SetSelectionMode(wx.grid.Grid.SelectRows)
         dtdebug(f'OnWindowCreate rec_to_select={rec}')
         self.OnRefresh(None, rec_to_select=rec)
@@ -1389,10 +1394,23 @@ class NeumoGridBase(wx.grid.Grid, glr.GridWithLabelRenderersMixin):
         self.MakeCellVisible(self.GetNumberRows()-1, 0)
         wx.CallAfter(self.SetGridCursor, self.GetNumberRows()-1, 0)
 
+    def CmdNew(self, event):
+        dtdebug("CmdNew")
+        f = wx.GetApp().frame
+        if not f.edit_mode:
+            f.SetEditMode(True)
+        self.OnNew(event)
+
     def OnDelete(self, evt):
         dtdebug(f"delete record row={self.GetGridCursorRow()} col={self.GetGridCursorCol()}; " \
                 "SELECTED ROWS={self.GetSelectedRows()}")
         wx.CallAfter(self.table.DeleteRows, self.GetSelectedRows())
+
+    def CmdDelete(self, event):
+        dtdebug("CmdDelete")
+        self.OnDelete(event)
+        return False
+
     def OnEditMode(self, evt):
         self.app.frame.ToggleEditMode()
 
@@ -1475,7 +1493,7 @@ class GridPopup(wx.ComboPopup):
 
     # Called immediately after the popup is shown
     def OnPopup(self):
-        rec_to_select = self.popup_grid.table.InitialRecord()
+        rec_to_select = self.popup_grid.InitialRecord()
         wx.CallAfter(self.popup_grid.OnRefresh, None, rec_to_select)
         wx.ComboPopup.OnPopup(self)
 

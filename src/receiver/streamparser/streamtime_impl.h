@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -20,19 +20,6 @@
 
 #pragma once
 
-#define PACKED __attribute__((packed))
+#define DTPACKED __attribute__((packed))
 #include <iostream>
 #include <iomanip>
-
-
-
-namespace dtdemux {
-	std::ostream& operator<<(std::ostream& os, const pts_dts_t& a);
-
-	inline std::ostream& operator<<(std::ostream& os, const data_range_t& r) {
-		int packet = (r.start_bytepos())/188;
-		int64_t offset = r.start_bytepos() -packet*(int64_t)188;//offset of start in current packet
-		//packet[offset of cursor w.r.t. start packet, offset of end w.r.t. start packet
-		return  os <<  std::setw(10) << packet << ":[" << (r.start_bytepos()+offset) << ", " << (r.len()+offset) << "]";
-	}
-}

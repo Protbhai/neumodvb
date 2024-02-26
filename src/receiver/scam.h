@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -129,8 +129,7 @@ class active_scam_t final : public active_stream_t  {
 public:
 
 
-	active_scam_t(scam_t* parent,
-								receiver_t& receiver, tuner_thread_t& tuner_thread,
+	active_scam_t(scam_t* parent, receiver_t& receiver,
 								active_service_t& active_service);
 	int register_active_service(active_service_t* active_service);
 	int unregister_active_service(active_service_t* active_service, int adapter_no);
@@ -196,11 +195,7 @@ class scam_t final : public std::enable_shared_from_this<scam_t> {
 	bool is_scam_fd(const epoll_event* event) const {
 		return event->data.fd== int(scam_fd);
 	}
-#ifdef OLDFIBER
-	fiber_t reader_loop_(fiber_t&& invoker, void* fp);
-#else
 	void reader_loop_();
-#endif
 	void read_greeting_reply();
 	void read_filter_request();
 	void read_dmx_stop_request();

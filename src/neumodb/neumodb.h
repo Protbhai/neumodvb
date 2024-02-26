@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -119,8 +119,6 @@ public:
 
 	lmdb::dbi dbi_log{0}; //dangerous but convenient; could lead to errors if open is not called
 
-	int wait_for_activity(int old_txnid);
-
 	neumodb_t(const neumodb_t& main);
 
 	neumodb_t& operator = (const neumodb_t& other);
@@ -133,13 +131,11 @@ public:
 		int dead=0;
 		int rc= mdb_reader_check(*envp, &dead);
 		if(rc) {
-
-			LOG4CXX_FATAL(logger, "lmdb error db="<< dbpath << " err=" <<  mdb_strerror(rc));
+			auto msg = fmt::format("lmdb error db={} err={}", dbpath, mdb_strerror(rc));
+			LOG4CXX_FATAL(logger, msg);
 
 		} else if (rc>0) {
-
-		LOG4CXX_DEBUG(logger, "Cleaned " <<  dead << " stale readers for db=" << dbpath);
-
+			dtdebugf("Cleaned {} stale readers for db={}", dead, dbpath);
 		}
 	}
 
@@ -246,17 +242,17 @@ public:
 
 	db_txn wtxn() {
 		if(!is_open()) {
-			dterror("Attempting to access non opened lmdb database");
+			dterrorf("Attempting to access non opened lmdb database");
 			assert(0);
 		}
-		return db_txn(*this, 0);
+		return db_txn(*this, false /*readonly*/, 0);
 	}
 	db_txn rtxn() {
 		if(!is_open()) {
-			dterror("Attempting to access non opened lmdb database");
+			dterrorf("Attempting to access non opened lmdb database");
 			assert(0);
 		}
-		return  db_txn(*this, MDB_RDONLY);
+		return  db_txn(*this, true /*readonly*/, MDB_RDONLY);
 	}
 
 	virtual ~neumodb_t();
@@ -291,9 +287,27 @@ struct neumo_schema_t;
 void print_schema(schema::neumo_schema_t& s);
 
 bool check_schema(const dbdesc_t& stored, const dbdesc_t& current);
-
-template<typename T> EXPORT const char* enum_to_str(const T& val);
+#if 0
+template<typename T> EXPORT const char* to_str(const T& val);
+#endif
 template<typename T> EXPORT  bool enum_is_valid(const T& val);
 
-std::ostream& operator<<(std::ostream& os, field_matcher_t::match_type_t match_type);
-std::ostream& operator<<(std::ostream& os, const field_matcher_t& matcher);
+#ifdef declfmt
+#undef declfmt
+#endif
+
+#define declfmt(t)																											\
+	template <> struct fmt::formatter<t> {																\
+	inline constexpr format_parse_context::iterator parse(format_parse_context& ctx) { \
+		return ctx.begin();																									\
+	}																																			\
+																																				\
+	format_context::iterator format(const t&, format_context& ctx) const ;\
+}
+
+
+declfmt(field_matcher_t::match_type_t);
+declfmt(field_matcher_t);
+#if 0 //not implemented
+#endif
+#undef declfmt

@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -26,49 +26,17 @@
 
 
 #include "neumodb/statdb/statdb_db.h"
-#include "stackstring/ssaccu.h"
+#include "stackstring/stackstring.h"
 #include "neumodb/chdb/chdb_extra.h"
 
 struct spectrum_scan_t;
 
 namespace statdb {
 	using namespace statdb;
-
-	std::ostream& operator<<(std::ostream& os, const signal_stat_key_t& k);
-	std::ostream& operator<<(std::ostream& os, const signal_stat_entry_t& entry);
-	std::ostream& operator<<(std::ostream& os, const signal_stat_t& stat);
-	std::ostream& operator<<(std::ostream& os, const spectrum_key_t& spectrum_key);
-	std::ostream& operator<<(std::ostream& os, const spectrum_t& spectrum);
-
-	inline void to_str(ss::string_& ret, const signal_stat_entry_t& entry) {
-		ret << entry;
-	}
-
-	inline void to_str(ss::string_& ret, const signal_stat_key_t& k) {
-		ret << k;
-	}
-
-	inline void to_str(ss::string_& ret, const signal_stat_t& stat) {
-		ret << stat;
-	}
-
-	inline void to_str(ss::string_& ret, const spectrum_key_t& spectrum_key) {
-		ret << spectrum_key;
-	}
-
-	inline void to_str(ss::string_& ret, const spectrum_t& spectrum) {
-		ret << spectrum;
-	}
-
-	template<typename T>
-	inline auto to_str(T&& t)
-	{
-		ss::string<128> s;
-		to_str((ss::string_&)s, (const T&) t);
-		return s;
-	}
-
 	void make_spectrum_scan_filename(ss::string_& ret, const statdb::spectrum_t& spectrum);
+
+	std::optional<statdb::spectrum_t>
+	make_spectrum(const ss::string_& spectrum_path, const spectrum_scan_t& scan, bool append, int min_freq);
 
 	std::optional<statdb::spectrum_t>
 	save_spectrum_scan(const ss::string_& spectrum_path, const spectrum_scan_t& scan, bool append, int min_freq);
@@ -82,3 +50,21 @@ namespace statdb::signal_stat {
 		db_txn& devdb_rtxn, int16_t sat_pos, chdb::fe_polarisation_t pol, int frequency, time_t start_time,
 		int tolerance);
 }
+
+#ifdef declfmt
+#undef declfmt
+#endif
+#define declfmt(t)																											\
+	template <> struct fmt::formatter<t> {																\
+	inline constexpr format_parse_context::iterator parse(format_parse_context& ctx) { \
+		return ctx.begin();																									\
+	}																																			\
+																																				\
+	format_context::iterator format(const t&, format_context& ctx) const ;\
+}
+
+declfmt(statdb::signal_stat_key_t);
+declfmt(statdb::signal_stat_entry_t);
+declfmt(statdb::signal_stat_t);
+declfmt(statdb::spectrum_key_t);
+declfmt(statdb::spectrum_t);

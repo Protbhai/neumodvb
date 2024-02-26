@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -20,6 +20,7 @@ import sys
 import os
 import pathlib
 from inspect import currentframe, getframeinfo
+from itertools import islice
 
 def is_installed():
     return 'lib64' in Path(__file__).parts or 'lib' in Path(__file__).parts
@@ -57,7 +58,9 @@ def setup():
         sys.path.insert(0, str(srcdir / 'neumodb/recdb'))
         sys.path.insert(0, str(srcdir / 'stackstring/'))
     else:
+        import sysconfig
         sys.path.insert(0, str(pathlib.Path(maindir_)))
+        sys.path.insert(0, f"{pathlib.Path(sysconfig.get_path('stdlib'), 'neumodvb')}")
     os.environ['PATH'] +=  os.pathsep + str(builddir / 'neumodb') # for neumoupgrade
     #to suppress some more annoying warnings
     os.environ['XDG_CURRENT_DESKTOP'] = 'none'
@@ -193,3 +196,18 @@ def find_parent_prop(self, attr, parent=None):
         return find_parent_prop(self.Parent, attr, parent=self if parent is None else parent)
     elif hasattr(self, 'parent'):
         return find_parent_prop(self.parent, attr, parent=self if parent is None else parent)
+
+def batched(iterable, n):
+    "Batch data into tuples of length n. The last batch may be shorter."
+    # batched('ABCDEFG', 3) --> ABC DEF G
+    if n < 1:
+        raise ValueError('n must be at least one')
+    it = iter(iterable)
+    while (batch := tuple(islice(it, n))):
+        yield batch
+
+def get_last_scan_text_dict(st):
+    return dict(muxes=f" Muxes: ok={st.locked_muxes} failed={st.failed_muxes} " \
+                f"pending={st.pending_muxes} active={st.active_muxes}",
+                peaks=f"Peaks: failed={st.failed_peaks} pending={st.pending_peaks}",
+                bands=f"Bands: pending={st.pending_bands} active={st.active_bands}" )

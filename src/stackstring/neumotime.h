@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -25,7 +25,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
-#define PACKED __attribute__((packed))
+#include "fmt/core.h"
+
+#define DTPACKED __attribute__((packed))
 
 struct milliseconds_t {
 	int64_t ms = 0;
@@ -91,5 +93,9 @@ namespace std {
 	};
 }
 
-
-std::ostream& operator<<(std::ostream& os, const milliseconds_t& a);
+template <> struct fmt::formatter<milliseconds_t> {
+	inline constexpr format_parse_context::iterator parse(format_parse_context& ctx) {
+		return ctx.begin();
+	}
+	format_context::iterator format(const milliseconds_t&, format_context& ctx) const ;
+};

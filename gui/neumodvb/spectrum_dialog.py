@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -23,7 +23,7 @@ from dateutil import tz
 import pydevdb
 import pychdb
 
-from neumodvb.util import dtdebug, dterror, is_circ
+from neumodvb.util import dtdebug, dterror, is_circ, get_last_scan_text_dict
 from neumodvb.spectrum_dialog_gui import SpectrumDialog_, SpectrumButtons_, SpectrumListPanel_
 from neumodvb.neumo_dialogs import ShowMessage, ShowOkCancel
 import pyreceiver
@@ -69,6 +69,8 @@ class SpectrumButtons(SpectrumButtons_):
 
     def select_range_and_pols(self):
         lnb = self.parent.lnb
+        if lnb is None:
+            return
         if lnb.pol_type in (pydevdb.lnb_pol_type_t.VH, pydevdb.lnb_pol_type_t.HV,
                             pydevdb.lnb_pol_type_t.LR, pydevdb.lnb_pol_type_t.RL,
                             pydevdb.lnb_pol_type_t.L, pydevdb.lnb_pol_type_t.H):
@@ -134,8 +136,8 @@ class SpectrumDialog(SpectrumDialog_):
         self.spectrum_buttons_panel.select_start_end(self.lnb)
         self.gettting_spectrum_ = False
 
-        bp_t = pydevdb.fe_band_pol.fe_band_pol
-        b_t = pydevdb.fe_band_t
+        bp_t = pychdb.sat_sub_band_pol
+        b_t = pychdb.sat_band_t
         p_t = pychdb.fe_polarisation_t
 
         self.is_blindscanning = False
@@ -264,9 +266,9 @@ class SpectrumDialog(SpectrumDialog_):
                 pol = self.pols_to_scan.pop(0)
                 #reread usals in case we are part of spectrum_dialog and positioner_dialog has changed them
                 self.tune_mux_panel.lnb = self.tune_mux_panel.read_lnb_from_db()
-                self.mux_subscriber.subscribe_spectrum(self.rf_path, self.lnb, pol,
-                                                       self.start_freq, self.end_freq,
-                                                       self.sat.sat_pos)
+                self.mux_subscriber.subscribe_spectrum_acquisition(self.rf_path, self.lnb, pol,
+                                                                   self.start_freq, self.end_freq,
+                                                                   self.sat)
         event.Skip()
 
     def EndBlindScan(self):
@@ -285,7 +287,7 @@ class SpectrumDialog(SpectrumDialog_):
         if self.is_blindscanning:
             self.EndBlindScan()
             self.spectrum_buttons_panel.blindscan_button.SetValue(0)
-
+            self.spectrum_plot.end_scan()
 
     def OnBlindScan(self, event=None):
         dtdebug("Blindscan start parallel")
@@ -318,7 +320,7 @@ class SpectrumDialog(SpectrumDialog_):
                 k.rf_path.lnb = lnb.k # in case user has overridden
                 newkey = self.spectrum_plot.make_key(spectrum.spectrum)
                 new_entries.append((newkey,  spectrum))
-            subscriber.scan_spectral_peaks(k, spectrum.peak_data[:,0], spectrum.peak_data[:,1])
+            subscriber.scan_spectral_peaks(self.rf_path, k, spectrum.peak_data[:,0], spectrum.peak_data[:,1])
         for key, spectrum in new_entries:
             self.spectrum_plot.spectra[key] = spectrum
     def OnSelectMux(self, tp):
@@ -377,25 +379,26 @@ class SpectrumDialog(SpectrumDialog_):
     def OnSubscriberCallback(self, data):
         if type(data) == str:
             ShowMessage("Error", data)
+            self.spectrum_buttons_panel.acquire_spectrum.SetValue(0)
+            self.EndBlindScan()
             return
         need_si = True
-        if type(data) == pyreceiver.scan_report_t: #called from scanner
-            is_scan_end = data.mux is None
-            if is_scan_end:
-                dtdebug("scan end")
-            else:
-                has_lock = data.mux.c.scan_result != pychdb.scan_result_t.NOLOCK
-                self.spectrum_plot.set_annot_status(data.spectrum_key, data.peak, data.mux, has_lock)
+        if type(data) == pyreceiver.scan_mux_end_report_t: #called from scanner
+            assert data.mux is not None
+            has_lock = data.mux.c.scan_result != pychdb.scan_result_t.NOLOCK
+            self.spectrum_plot.set_annot_status(data.spectrum_key, data.peak.peak, data.mux, has_lock)
 
-            s = data.scan_stats
-            if data.scan_stats.pending_muxes + data.scan_stats.active_muxes + \
-               data.scan_stats.pending_peaks == 0:
+        elif type(data) == pydevdb.scan_stats.scan_stats: #called from scanner
+            scan_stats = data
+            self.spectrum_plot.scan_status_text.ShowScanRecord(scan_stats)
+
+            if scan_stats.finished:
                 self.is_blindscanning = False
                 self.blindscan_end = datetime.datetime.now(tz=tz.tzlocal())
                 m, s =  divmod(round((self.blindscan_end -  self.blindscan_start).total_seconds()), 60)
                 title = "Blindscan spectrum finished"
-                msg = f"Scanned: {data.scan_stats.finished_muxes} (Locked: {data.scan_stats.locked_muxes}; " \
-                    f"DVB: {data.scan_stats.si_muxes}; Failed: {data.scan_stats.failed_muxes}) muxes in {m}min {s}s"
+                msg = f"Scanned: {scan_stats.finished_muxes} (Locked: {scan_stats.locked_muxes}; " \
+                    f"DVB: {scan_stats.si_muxes}; Failed: {scan_stats.failed_muxes}) muxes in {m}min {s}s"
                 dtdebug(msg)
                 ShowMessage(title, msg)
                 self.spectrum_buttons_panel.blindscan_button.SetValue(0)
@@ -425,9 +428,9 @@ class SpectrumDialog(SpectrumDialog_):
             if data.is_complete:
                 if len(self.pols_to_scan) != 0:
                     pol = self.pols_to_scan.pop(0)
-                    self.mux_subscriber.subscribe_spectrum(self.rf_path, self.lnb, pol,
-                                                           self.start_freq, self.end_freq,
-                                                           self.sat.sat_pos)
+                    self.mux_subscriber.subscribe_spectrum_acquisition(self.rf_path, self.lnb, pol,
+                                                                       self.start_freq, self.end_freq,
+                                                                       self.sat)
                 else:
                     self.spectrum_buttons_panel.acquire_spectrum.SetValue(0)
                     self.tune_mux_panel.AbortTune()

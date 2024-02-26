@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -74,16 +74,16 @@ static void set_process_name(const char* name)
 	int argc =0;
 	int i=0;
 	get_argc_argv(&argc, &argv);
-	printf("argc=%d\n", argc);
+	printf("argc={:d}\n", argc);
 	auto l = strlen(argv[0]);
 	if (strlen(name) > l) {
-		dterrorx("String too long: %s\n", name);
+		dterrorf("String too long: {}\n", name);
 	}
 	strncpy(argv[0], name, l+1);
 	for(i=1; i <argc; ++i)
 		argv[i]=0;
 	if (prctl(PR_SET_NAME, (unsigned long)argv[0], 0, 0, 0) < 0) {
-		dterrorx("prctl failed: %s", strerror(errno));
+		dterrorf("prctl failed: {}", strerror(errno));
 	}
 	pthread_setname_np(pthread_self(), argv[0]);
 #else
@@ -120,7 +120,12 @@ static void export_receiver(py::module& m) {
 		.def("init", &receiver_t::init, "Re-initialize a receiver if creating it failed")
 		.def("renumber_card", &receiver_t::renumber_card, "Renumber a card",
 				 py::arg("old_number"), py::arg("new_number"))
-		.def("unsubscribe", &receiver_t::unsubscribe, "Unsubscribe a service or mux", py::arg("subscription_id"))
+		.def("update_autorec",
+				 (&receiver_t::update_autorec),
+				 "Create or update an auto rec", py::arg("autorec"))
+		.def("delete_autorec",
+				 (&receiver_t::update_autorec),
+				 "Delete an auto rec", py::arg("autorec"))
 		.def("toggle_recording",
 				 py::overload_cast<const chdb::service_t&, const epgdb::epg_record_t&>(&receiver_t::toggle_recording),
 				 "Toggle recording of an epg event.", py::arg("service"), py::arg("epgrecord"))
@@ -130,11 +135,17 @@ static void export_receiver(py::module& m) {
 				 py::overload_cast<const chdb::service_t&, time_t, int, const char*>(&receiver_t::toggle_recording),
 				 "Toggle recording the current service.", py::arg("service"), py::arg("start"), py::arg("duration"),
 				 py::arg("event_name"))
+		.def("update_and_toggle_stream"
+				 , &receiver_t::update_and_toggle_stream
+				 , "Add or update a stream in the database and start or stop the stream accordingly"
+				 , py::arg("stream")
+			)
+
+		.def("get_default_tune_options", &receiver_t::get_default_tune_options,
+				 py::arg("subscription_type"))
 		.def("get_api_type", &receiver_t::get_api_type)
 		.def("get_options", &receiver_t::get_options)
 		.def("set_options", &receiver_t::set_options, py::arg("options"))
-		.def("get_scan_stats", &receiver_t::get_scan_stats, "Return true if a statistics of current scan, in progress",
-				 py::arg("subscription_id"))
 		.def(
 			"get_spectrum_path",
 			[](receiver_t& receiver) { return std::string(receiver.options.readAccess()->spectrum_path.c_str()); },
@@ -163,6 +174,7 @@ PYBIND11_MODULE(pyreceiver, m) {
 	export_receiver(m);
 	export_subscriber(m);
 	export_signal_info(m);
+	export_position_motion_report(m);
 	export_sdt_data(m);
 	export_scan_report(m);
 	export_logger(m);

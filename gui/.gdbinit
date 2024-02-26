@@ -2,12 +2,14 @@ set breakpoint pending on
 #break dvbdev_monitor_t::find_lnb_for_tuning_to_mux
 #break  active_mux_t::tune
 #set index-cache directory /tmp/index
-#set index-cache on
+#set index-cache enabled
 #set environment LD_PRELOAD /usr/lib64/clang/14.0.5/lib/linux/libclang_rt.asan-x86_64.so
+set print finish off
 set environment LD_PRELOAD=/usr/lib64/libasan.so.8
 break __sanitizer::Die
 exec-file /usr/bin/python3
 set args neumodvb.py
+set detach-on-fork on
 #set environment LD_PRELOAD /usr/lib64/libasan.so.6
 #break nit_parser_t::parse_payload_unit
 #break active_si_stream.cc:752
@@ -17,7 +19,7 @@ set args neumodvb.py
 dir $cdir:../
 set logging file /tmp/x.log
 set logging enabled on
-#set debuginfod enabled off
+set debuginfod enabled off
 set pagination off
 source prettyprint.py
 set print pretty
@@ -29,7 +31,7 @@ end
 define loadbreak
   source breakpoints my.brk
 end
-
+break subscriber.cc:132
 
 define pp
   if $argc == 1
@@ -68,3 +70,4 @@ end
     set $n = $n + 1
   end
  end
+# set demangle-style none

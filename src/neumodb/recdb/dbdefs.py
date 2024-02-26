@@ -1,5 +1,6 @@
 import os
 import sys
+
 from inspect import getsourcefile
 
 def get_scriptdir():
@@ -20,25 +21,8 @@ db = db_db(gen_options)
 def lord(x):
     return  int.from_bytes(x.encode(), sys.byteorder)
 
-
-"""
-TODO: we also need to store epg records in this database; this could be problematic because of
-overlapping type ids.
-It may be possible to use different sub databases ("data1", "idx1", ... in addition to "data", "idx").
-Currently storing a schema has not yet been implemented; we could store a different schema for
-each sub database.
-
-Alternatively, we could create a separate small epg database in a different file.
-Still alternatively, we could duplicate the epg types in a different namespace (requires cumbersome
-conversion between in essence similar types + risk of problems while upgrading
-
-Easiest solution seems separate epg database
-
-"""
-
-if True:
-    db_include(fname='rec', db=db, include='neumodb/chdb/chdb_db.h')
-    db_include(fname='rec', db=db, include='neumodb/epgdb/epgdb_db.h')
+db_include(fname='chdb', db=db, include='neumodb/chdb/chdb_db.h')
+db_include(fname='epgdb', db=db, include='neumodb/epgdb/epgdb_db.h')
 
 list_filter_type = db_enum(name='list_filter_type_t',
                            db = db,
@@ -124,11 +108,12 @@ rec = db_struct(name='rec',
                               (ord('T'), 'start_time', ('real_time_start',)),
                      ),                     #not unique
                      fields = (
-                         (1, 'rec_type_t', 'rec_type'),                                                   #0
-                         #(2, 'rec_status_t',  'status'), #in progress, scheduled, ... (included in epg)  #1
-                         (3, 'int32_t', 'subscription_id'), #temporarily used during recording            #2
+                         (1, 'rec_type_t', 'rec_type'),
+                         (14, 'int32_t', 'owner', -1), #pid of the process executing the recording, or -1
+                                                       #when the recording is not active
+                         (3, 'int32_t', 'subscription_id'), #subscription_id of recording in progress
                          #in milliseconds, relative to start tuning service
-                         (4, 'milliseconds_t', 'stream_time_start'),                                      #6
+                         (4, 'milliseconds_t', 'stream_time_start'),
                          (5, 'milliseconds_t', 'stream_time_end'), #if missing => runs to end
                          #official end time unix epoch
                          (6, 'time_t', 'real_time_start'), #in unix epoch
@@ -169,7 +154,7 @@ file = db_struct(name='file',
                 (ord('f'), 'fileno', ('fileno',)),
                 ),                     #unique
                 fields = ((1, 'file_key_t', 'k'),
-                          (2, 'uint32_t', 'fileno'), #needed to avoid consulting db during timeshift to find how many records have been written
+                          (2, 'int32_t', 'fileno'), #needed to avoid consulting db during timeshift to find how many records have been written
                           (3, 'milliseconds_t', 'stream_time_end', 'std::numeric_limits<milliseconds_t>::max()'), #in milliseconds
                           (4, 'time_t', 'real_time_start'), #unix epoch
                           (5, 'time_t', 'real_time_end'), #in unix epoch
@@ -187,31 +172,44 @@ live_service = db_struct(name = 'live_service',
                         db = db,
                         type_id= ord('L'),
                         version = 1,
-                         primary_key = ('key', ('creation_time','adapter_no')), #unique
+                         primary_key = ('key', ('owner', 'subscription_id')), #unique
                          keys =  (
-                             (ord('l'), 'update_time', ('update_time',)),
-                         ),                     #unique
+                             #(ord('l'), 'update_time', ('update_time',)), #unique
+                         ),
                         fields = (
+                            (7, 'int32_t', 'owner', -1),
+                            (8, 'int32_t', 'subscription_id', -1),
                             (1, 'time_t', 'creation_time'),
-                            (2, 'uint8_t', 'adapter_no'),
-                            (3, 'time_t', 'update_time'),
-                            (4, 'chdb::service_t', 'service'),
+                            (2, 'int8_t', 'adapter_no'),
+                            (3, 'time_t', 'last_use_time', '-1'), #-1 signifies still being used
+                            (4, 'chdb::service_t', 'service'), #last used service
                             (5, 'ss::string<128>', 'dirname'),
-                            (6, 'epgdb::epg_record_t', 'epg') #currently active epg
+                            #(6, 'epgdb::epg_record_t', 'epg') #currently active epg
                         ))
 
 
 
 autorec = db_struct(name='autorec',
-                     fname = 'rec',
-                     db = db,
-                     type_id= ord('e'),
-                     version = 1,
-                     primary_key = ('key', ('id',)), #unique
-                     keys =  (
-                     ),                     #not unique
-                     fields = ((1, 'uint32_t', 'id'),
-                     ))
+                    fname = 'rec',
+                    db = db,
+                    type_id= ord('e'),
+                    version = 1,
+                    primary_key = ('key', ('id',)), #unique
+                    keys =  (
+                        (lord('es'), 'service', ('service',)),
+                    ),                     #not unique
+
+                    fields = ((1, 'int32_t', 'id', '-1'), # -1 means "not set"
+                              (2, 'chdb::service_key_t', 'service'), #sat_pos_none indicated: not set
+                              (3, 'int32_t', 'starts_after', '0'), #in seconds from midnight
+                              (4, 'int32_t', 'starts_before', '3600*24'), #in seconds from midnight
+                              (5, 'int32_t', 'min_duration', '0'), #in seconds
+                              (6, 'int32_t', 'max_duration', '2*3600'), #in seconds
+                              (7, 'ss::vector<uint16_t,4>', 'content_codes', '0'), #any
+                              (8, 'ss::string<16>', 'event_name_contains'),
+                              (9, 'ss::string<16>', 'story_contains'),
+                              (10, 'ss::string<16>', 'service_name'), #only for informational purposes
+                              ))
 
 stream_descriptor = db_struct(name='stream_descriptor',
                      fname = 'rec',

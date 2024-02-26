@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -27,6 +27,7 @@
 
 #include "stackstring.h"
 
+//#define PRINTTIME
 namespace dtdemux {
 	struct stored_section_t;
 	struct pmt_info_t;
@@ -49,7 +50,8 @@ namespace dtdemux {
 		bool timedout{false};
 		subtable_info_t() = default;
 		subtable_info_t(int pid, bool is_actual,
-										int table_id, int version_number, int num_sections_present, bool completed, bool timedout)
+										int table_id, int version_number,
+										int num_sections_present, bool completed, bool timedout)
 			: pid(pid)
 			, is_actual(is_actual)
 			,	table_id(table_id)
@@ -268,9 +270,9 @@ namespace dtdemux {
 		int num_subtables_completed{0};
 
 		uint16_t channel_id{0xffff}; //only for opentv/skyuk
-		epgdb::epg_service_t epg_service;
+		chdb::service_key_t service_key{};
 
-		ss::vector<epgdb::epg_record_t, 64> epg_records;
+		ss::vector<epgdb::epg_record_t, 128> epg_records;
 	};
 
 	class section_parser_t : public ts_substream_t
@@ -433,6 +435,12 @@ namespace dtdemux {
 
 	struct eit_parser_t : public psi_parser_t
 	{
+#ifdef PRINTTIME
+		static int64_t processing_count;
+		static int64_t callback_count;
+		static int64_t processing_delay;
+		static int64_t callback_delay;
+#endif
 		parser_status_t  parser_status;
 		chdb::epg_type_t epg_type{chdb::epg_type_t::UNKNOWN};
 		std::function<reset_type_t(epg_t&, const subtable_info_t&)>
@@ -529,11 +537,22 @@ namespace dtdemux {
 			st == stream_type_t::EAC3_AUDIO;
 	}
 
-
-
-	std::ostream& operator<<(std::ostream& os, const pid_info_t& info);
-	std::ostream& operator<<(std::ostream& os, const pmt_info_t& pmt);
-
 } //namespace dtdemux
 const char* lang_name(const char* code);
 const char* lang_name(uint32_t code);
+
+template <> struct fmt::formatter<dtdemux::pid_info_t> {
+		inline constexpr auto parse(format_parse_context& ctx) -> format_parse_context::iterator {
+			return ctx.begin();
+		}
+
+	auto format(const dtdemux::pid_info_t& a, format_context& ctx) const -> format_context::iterator;
+};
+
+template <> struct fmt::formatter<dtdemux::pmt_info_t> {
+		inline constexpr auto parse(format_parse_context& ctx) -> format_parse_context::iterator {
+			return ctx.begin();
+		}
+
+	auto format(const dtdemux::pmt_info_t& a, format_context& ctx) const -> format_context::iterator;
+};

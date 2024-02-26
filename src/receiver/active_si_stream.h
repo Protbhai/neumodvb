@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -19,6 +19,7 @@
  */
 
 #pragma once
+#include "txnmgr.h"
 #include "stackstring.h"
 #include "active_stream.h"
 #include "receiver.h"
@@ -37,8 +38,6 @@ struct pat_service_t {
 	bool pmt_analysis_finished{false};
 	bool encrypted{false};
 	pmt_info_t pmt;
-	std::shared_ptr<pmt_parser_t> parser;
-
 };
 
 
@@ -145,7 +144,7 @@ struct onid_data_t {
 		p.sdt_completed = true;
 		sdt_num_muxes_completed += !ret;
 		if(ret) {
-			dtdebugx("sdt: ts_id=%d completed multiple times", ts_id);
+			dtdebugf("sdt: ts_id={:d} completed multiple times", ts_id);
 		}
 		return ret;
 	}
@@ -286,6 +285,12 @@ struct eit_data_t {
 	int eit_actual_existing_records{0};
 	int eit_other_updated_records{0};
 	int eit_other_existing_records{0};
+	int sky_title_pids_present{0};
+	int sky_title_pids_completed{0};
+
+	inline bool sky_title_done() const {
+		return sky_title_pids_present ==  sky_title_pids_completed;
+	}
 
 	struct subtable_count_t {
 		int num_known{0};
@@ -298,7 +303,7 @@ struct eit_data_t {
 					 std::tuple<time_t, time_t>> otv_times_for_event_id; //start and end time indexed by channel_id, event_id
 
 	std::map<std::tuple<uint32_t>,
-					 std::tuple<epgdb::epg_service_t, time_t, time_t>> mhw2_key_for_event_id; //key and start/end time indexed by summary_id
+					 std::tuple<chdb::service_key_t, time_t, time_t>> mhw2_key_for_event_id; //key and start/end time indexed by summary_id
 
 
 	void reset() {
@@ -326,7 +331,6 @@ struct bat_data_t {
 
 	std::map <uint16_t, bouquet_data_t> by_bouquet_id;
 	std::map<uint16_t, chdb::service_key_t> opentv_service_keys; //indexed by channel_id
-
 
 	bouquet_data_t& get_bouquet(const chdb::chg_t& chg) {
 		auto [it, found] = by_bouquet_id.try_emplace(chg.k.bouquet_id,
@@ -365,6 +369,8 @@ struct active_si_data_t {
 
 	scan_state_t scan_state;
 	bool scan_in_progress{false};
+
+	int epg_completeness();
 
 	inline bool ts_id_in_pat(uint16_t ts_id) {
 		return pat_data.by_ts_id.find(ts_id) != pat_data.by_ts_id.end();
@@ -484,7 +490,6 @@ struct active_si_data_t {
 		return bat_done();
 	}
 
-
 	bool nit_other_all_networks_completed() const {
 		/*@todo: this includes also nit_actual, which is incorrect.
 
@@ -543,8 +548,6 @@ struct active_si_data_t {
 
 };
 
-
-
 class active_si_stream_t final : /*public std::enable_shared_from_this<active_stream_t>,*/
 	public active_stream_t, active_si_data_t
 {
@@ -552,32 +555,14 @@ class active_si_stream_t final : /*public std::enable_shared_from_this<active_st
 
 
 	friend class tuner_thread_t;
-
-	chdb::chdb_t& chdb;
-	epgdb::epgdb_t& epgdb;
-
-	std::optional<db_txn> epgdb_txn_;
-	std::optional<db_txn> chdb_txn_;
-
+	txnmgr_t<chdb::chdb_t> chdbmgr;
+	txnmgr_t<epgdb::epgdb_t> epgdbmgr;
 	inline chdb::mux_key_t stream_mux_key() const {
 		auto tmp = reader->stream_mux();
 		return *chdb::mux_key_ptr(tmp);
 	}
-
-	inline db_txn epgdb_txn() {
-		if(!epgdb_txn_)
-			epgdb_txn_.emplace(epgdb.wtxn());
-		return epgdb_txn_->child_txn();
-	}
-
-	inline db_txn chdb_txn() {
-		if(!chdb_txn_)
-			chdb_txn_.emplace(chdb.wtxn());
-		return chdb_txn_->child_txn();
-	}
-
 	dtdemux::ts_stream_t stream_parser;
-	scan_target_t scan_target; //which SI tables should be scanned?
+	devdb::scan_target_t scan_target; //which SI tables should be scanned?
 	bool si_processing_done{false};
 	bool call_scan_mux_end{false};
 	/*we need one parser per pid; within each pid multiple tables may exist
@@ -588,6 +573,10 @@ class active_si_stream_t final : /*public std::enable_shared_from_this<active_st
 	struct parser_slot_t {
 		std::shared_ptr<dtdemux::psi_parser_t> p;
 		int use_count{0};
+
+		~parser_slot_t() {
+			dtdebugf("~parser_slot_t: {:p} use_count={:d} p.use_count={:d}\n", fmt::ptr(this), use_count, p.use_count());
+		}
 	};
 	std::map<dvb_pid_t, parser_slot_t>  parsers;
 
@@ -602,14 +591,15 @@ class active_si_stream_t final : /*public std::enable_shared_from_this<active_st
 
 	dtdemux::reset_type_t
 		nit_actual_update_tune_confirmation(chdb::any_mux_t& mux, bool is_active_mux);
-	dtdemux::reset_type_t on_nit_section_completion(db_txn& wtxn, network_data_t& network_data,
-																					dtdemux::reset_type_t ret, bool is_actual,
-																					bool on_wrong_sat, bool done);
+	dtdemux::reset_type_t on_nit_section_completion(network_data_t& network_data,
+																									dtdemux::reset_type_t ret, bool is_actual,
+																									bool on_wrong_sat, bool done);
 	std::tuple<bool, bool>
 	sdt_process_service(db_txn& wtxn, const chdb::service_t& service, mux_data_t* p_mux_data,
 											bool donotsave, bool is_actual);
 
-	dtdemux::reset_type_t sdt_section_cb_(db_txn& txn, const sdt_services_t&services, const subtable_info_t& i,
+	dtdemux::reset_type_t sdt_section_cb_(txn_proxy_t<chdb::chdb_t> & wtxn,
+																				const sdt_services_t&services, const subtable_info_t& i,
 																				mux_data_t* p_mux_data);
 	dtdemux::reset_type_t sdt_section_cb(const sdt_services_t&services, const subtable_info_t& i);
 
@@ -642,32 +632,65 @@ class active_si_stream_t final : /*public std::enable_shared_from_this<active_st
 */
 	int save_network(db_txn& txn, const nit_network_t& network, int sat_pos);
 
-	void init_scanning(scan_target_t scan_target_);
-	bool init(scan_target_t scan_target_);
+	void init_scanning(devdb::scan_target_t scan_target_);
+	bool init(devdb::scan_target_t scan_target_);
 
 	template<typename parser_t, typename... Args>
-	auto add_parser(int pid, Args... args) {
+	auto add_parser(int pid, const ss::string_& ndc_prefix, Args... args) {
 		auto & slot = parsers[dvb_pid_t(pid)];
 		if (slot.use_count == 0) {
-			slot.p = stream_parser.register_pid<parser_t>(pid, args...);
+			assert(!slot.p);
+			slot.p = stream_parser.register_pid<parser_t>(pid, ndc_prefix, args...);
 			if(pid!=dtdemux::ts_stream_t::PAT_PID)
 				add_pid(pid);
 		}
 		slot.use_count++;
+		dtdebugf("add_parser for pid={:d} slot.use_count={:d}", pid, slot.use_count);
 		return static_cast<parser_t*>(slot.p.get());
 	}
 
-	void remove_parser(dtdemux::psi_parser_t* parser) {
-		dvb_pid_t pid{(uint16_t) parser->get_pid()};
-		auto & slot = parsers[pid];
-		if(--slot.use_count == 0) {
-			dtdebugx("removing parser for pid %d; use_count=%d\n", (uint16_t)pid, slot.use_count);
-			remove_pid(parser->get_pid());
-			parsers.erase(pid);
-		} else {
-			dtdebugx("not removing parser for pid %d; use_count=%d\n", (uint16_t)pid, slot.use_count);
+	inline void remove_dead_parsers() {
+		auto it = parsers.begin();
+		while(it != parsers.end()) {
+			auto& [pid, slot] = *it;
+			if(slot.use_count ==0) {
+				dtdebugf("remove_parser for pid={:d} slot.use_count={:d}", (int)pid, slot.use_count);
+				stream_parser.unregister_parser((int)pid);
+				remove_pid((int)pid);
+				it = parsers.erase(it);
+			} else
+				++it;
 		}
 	}
+#if 0
+	inline void dump_parsers() {
+		auto it = parsers.begin();
+		dtdebugf("dumping skyt");
+		while(it != parsers.end()) {
+			auto& [pid, slot] = *it;
+			if((int)pid >=0x30 && (int)pid < 0x38) {
+				eit_parser_t& p = dynamic_cast<eit_parser_t&>(*slot.p);
+				auto& parser_status = p.parser_status;
+				parser_status.dump_cstates((int)pid);
+			}
+			++it;
+		}
+		dtdebugf("dumping skyt done");
+	}
+#endif
+	/*
+		request pareser to be removed at a time when it is safe
+	 */
+	inline void release_parser(dtdemux::psi_parser_t* parser) {
+		auto pid = parser->get_pid();
+		auto & slot = parsers[(dvb_pid_t)pid];
+		dtdebugf("release_parser for pid={:d} slot.use_count={:d}", pid, slot.use_count);
+		assert(slot.use_count>0);
+		if(slot.use_count>=1)  {
+			slot.use_count--;
+		}
+	}
+
 	mux_data_t* add_mux(db_txn& wtxn, chdb::any_mux_t& mux, bool is_actual, bool is_active_mux,
 											bool is_tuned_freq, bool from_sdt);
 
@@ -708,10 +731,11 @@ class active_si_stream_t final : /*public std::enable_shared_from_this<active_st
 	mux_data_t* tuned_mux_in_nit();
 	void update_stream_ids_from_pat(db_txn& wtxn, chdb::any_mux_t& mux);
 	void save_pmts(db_txn& wtxn);
-	void activate_scan(chdb::any_mux_t& mux, subscription_id_t subscription_id, uint32_t scan_id);
+	void activate_scan(chdb::any_mux_t& mux, subscription_id_t subscription_id, const chdb::scan_id_t& scan_id);
 	void check_scan_mux_end();
 public:
 	void reset_si(bool close_streams);
+	void close();
 	void end();
 
 	//void process_psi(int pid, unsigned char* payload, int payload_size);

@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -80,7 +80,7 @@ public:
 
 	int open();
 	void close();
-	int start();
+	pid_t start();
 	void stop();
 	inline bool is_open() const {
 		bool ret = data_fd >=0;
@@ -89,11 +89,37 @@ public:
 	}
 	inline int read_external_data();
 
-	template<typename... Args>
-	int start_command(int stream_fd, const char* pathname, Args...args);
-
-
 	void register_reader(embedded_stream_reader_t* reader);
 	void unregister_reader(embedded_stream_reader_t* reader);
 	void notify_other_readers(embedded_stream_reader_t* reader);
+};
+
+//external command sending an ip stream
+class streamer_t {
+	friend class active_adapter_t;
+	int fd{-1};
+	devdb::stream_t stream;
+public:
+	streamer_t(int fd_, const devdb::stream_t& stream_)
+		: fd(fd_)
+		, stream(stream_)
+		{}
+	inline const chdb::service_t* get_service() const {
+		return std::get_if<chdb::service_t>(&stream.content);
+	}
+	inline int get_t2mi_pid() const {
+		return std::visit([](auto& record) -> int16_t {
+			if constexpr (is_same_type_v<chdb::service_t, decltype(record)>) {
+				return record.k.mux.t2mi_pid;
+			} else {
+				return record.k.t2mi_pid;
+			}
+			return -1;
+		}, stream.content);
+	}
+	int start();
+	void stop();
+	pid_t get_streamer_pid() const {
+		return stream.streamer_pid;
+	}
 };

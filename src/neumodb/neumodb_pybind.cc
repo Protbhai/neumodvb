@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -24,9 +24,9 @@
 #include "stackstring/stackstring.h"
 #include "stackstring/stackstring_pybind.h"
 #include "util/identification.h"
+#include "neumotime.h"
 #include <pybind11/pybind11.h>
 #include <stdio.h>
-
 namespace py = pybind11;
 void export_find_type(py::module& m) {
 	static int called = false;
@@ -56,15 +56,14 @@ void export_field_matcher_t(py::module& m) {
 		.value("GT", m_t::GT)
 		.value("LT", m_t::LT)
 		.value("STARTSWITH", m_t::STARTSWITH)
+		.value("CONTAINS", m_t::CONTAINS)
 		;
 
 	py::class_<field_matcher_t>(mm, "field_matcher")
 		.def(py::init<int8_t, field_matcher_t::match_type_t>())
 		.def("__repr__",
 				 [](field_matcher_t matcher) {
-					 std::stringstream ret;
-					 ret << matcher;
-					 return ret.str();
+					 return std::string(fmt::format("{}", matcher));
 				 })
 		.def_readwrite("field_id", &field_matcher_t::field_id)
 		.def_readwrite("match_type", &field_matcher_t::match_type)
@@ -81,9 +80,7 @@ void export_milli_seconds_t(py::module& m) {
 		.def(py::init<int64_t>())
 		.def("__repr__",
 				 [](milliseconds_t s) {
-					 std::stringstream ret;
-					 ret << s;
-					 return ret.str();
+					 return fmt::format("{}", s);
 				 })
 		.def("__int__", [](milliseconds_t s) { return s.ms; })
 		;
@@ -105,6 +102,8 @@ EXPORT void export_neumodb(py::module& m) {
 	export_ss_vector(m, int16_t);
 	export_ss_vector(m, int8_t);
 	export_ss_vector(m, uint8_t);
+	export_ss_vector(m, int64_t);
+
 	export_milli_seconds_t(m);
 	py::class_<db_txn>(m, "db_txn")
 		.def("commit", &db_txn::commit, "Commit transaction")
@@ -122,6 +121,6 @@ EXPORT void export_neumodb(py::module& m) {
 		.def("wtxn", &neumodb_t::wtxn, py::keep_alive<0, 1>())
 		.def("rtxn", &neumodb_t::rtxn, py::keep_alive<0, 1>())
 		.def_readonly("db_version", &neumodb_t::db_version)
-		//.def("stats", &stats_db)
+		.def("stats", &stats_db)
 		;
 }

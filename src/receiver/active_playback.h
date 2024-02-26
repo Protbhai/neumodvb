@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -49,17 +49,16 @@ public:
 		, currently_playing_recording(rec_) {}
 
 	virtual ~active_playback_t() final {
-		dtdebug("destructor\n");
+		dtdebugf("destructor\n");
 	}
-
 
 	virtual  ss::string<32> name() const {
-		return to_str(currently_playing_recording);
+		ss::string<32>  ret;
+		ret.format("{}", currently_playing_recording);
+		return ret;
 	}
 
-
-	/*@:
-		also during playback we need to monitor pmt for disappearing/appearing audio anguages.
+	/*also during playback we need to monitor pmt for disappearing/appearing audio anguages.
 		In this case, we have to tell the mpv thread to change to another track according to the user
 		preferences.
 		This also needs to be implemented in timeshift mode

@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -19,9 +19,6 @@
  */
 #include "active_playback.h"
 #include "active_service.h"
-#include "date/date.h"
-#include "date/iso_week.h"
-#include "date/tz.h"
 #include "mpm.h"
 #include "receiver.h"
 #include "util/logger.h"
@@ -35,9 +32,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
-using namespace date;
-using namespace date::clock_cast_detail;
-
+#include "util/dtassert.h"
 
 playback_mpm_t::playback_mpm_t(receiver_t& receiver_, subscription_id_t subscription_id_)
 	: mpm_t(true)
@@ -107,9 +102,15 @@ void playback_mpm_t::open_recording(const char* dirname_) {
 	assert(filemap.readonly);
 	live_mpm = nullptr;
 	db = std::make_shared<mpm_index_t>();
-	db->idx_dirname << dirname << "/"
-									<< "index.mdb";
-	db->open_index();
+	db->idx_dirname.format("{}/index.mdb", dirname);
+	try {
+		db->open_index();
+	} catch(const db_upgrade_info_t & upgrade_info) {
+		auto r = receiver.options.readAccess();
+		dtdebugf("Need upgrade from {}", r->upgrade_dir.c_str());
+		assert(0);
+	}
+
 	current_byte_pos = 0;
 	recdb::file_t empty{};
 	currently_playing_file.assign(empty);
@@ -126,7 +127,7 @@ void playback_mpm_t::open_recording(const char* dirname_) {
 		assert(current_byte_pos == 0);
 		find_current_pmts(current_byte_pos);
 	} else {
-		dterrorx("Cannot find rec in %s", db->idx_dirname.c_str());
+		dterrorf("Cannot find rec in {}", db->idx_dirname);
 	}
 	txn.abort();
 }
@@ -183,7 +184,7 @@ int playback_mpm_t::next_stream_change() { //byte at which new pmt becomes activ
 		assert(last_seen_live_meta_marker.last_streams.packetno_start >= ls->current_streams.packetno_start);
 		if (last_seen_live_meta_marker.last_streams.packetno_start == ls->current_streams.packetno_start) {
 			//no update pending for sure
-			//dtdebug("returning next pmt change never (live)");
+			//dtdebugf("returning next pmt change never (live)");
 			return never; //no update pending for sure
 		/* otherwise: we cannot rely on last_seen_live_meta_marker.last_stream.packetno_start because
 			 there may have been multiple pmt updates (unlikely); so we need to consult the database
@@ -223,14 +224,11 @@ void playback_mpm_t::update_pmt(stream_state_t& ss) {
 }
 
 
-
-
-
 int playback_mpm_t::set_language_pref(int idx, bool for_subtitles) {
 	auto ls = stream_state.writeAccess();
 	auto langs = for_subtitles ? ls->current_streams.subtitle_langs : ls->current_streams.audio_langs;
 	if (idx < 0 || idx >= langs.size()) {
-		dterrorx("set_language: index %d out of range", idx);
+		dterrorf("set_language: index {:d} out of range", idx);
 		return -1;
 	}
 
@@ -248,11 +246,13 @@ int playback_mpm_t::set_language_pref(int idx, bool for_subtitles) {
 	};
 
 	if (live_mpm) {
-		chdb::service_t service = live_mpm->active_service->get_current_service();
+		auto &active_service = *live_mpm->active_service;
+		chdb::service_t service = active_service.get_current_service();
 		update(service);
 		/*This needs to be run from tuner thread to avoid excessive blocking
 		 */
-		receiver.tuner_thread.push_task([this, service, for_subtitles]() // service passed by value!
+		auto& tuner_thread = active_service.active_adapter().tuner_thread;
+		tuner_thread.push_task([this, service, for_subtitles]() // service passed by value!
 			{
 				auto txn = receiver.chdb.wtxn();
 				/*
@@ -306,17 +306,21 @@ playback_info_t playback_mpm_t::get_current_program_info() const {
 		ret.play_time = p;
 	}
 	{
-		auto txnrecepg = this->db->mpm_rec.recepgdb.rtxn();
-		ret.epg = epgdb::running_now(txnrecepg, ret.service.k, ret.play_time);
-		txnrecepg.abort();
+		auto txnrec = this->db->mpm_rec.recdb.rtxn();
+		auto c = recdb::find_first<recdb::rec_t>(txnrec);
+		if(c.is_valid()) {
+			auto rec = c.current();
+			ret.epg = rec.epg;
+		}
+		txnrec.abort();
 	}
 	return ret;
 }
 
 void playback_mpm_t::force_abort() {
 	if (live_mpm) {
-		dtdebugx("FORCE abort playback_mpm=%p live_mpm= %s", this,
-						 live_mpm->active_service->get_current_service().name.c_str());
+		dtdebugf("FORCE abort playback_mpm={:p} live_mpm={:s}", fmt::ptr(this),
+						 live_mpm->active_service->get_current_service().name);
 		must_exit = true;
 		live_mpm->meta_marker.writeAccess()->interrupt();
 	}
@@ -333,10 +337,10 @@ int playback_mpm_t::move_to_time(milliseconds_t start_play_time) {
 	clear_stream_state();
 	if (start_play_time < milliseconds_t(0))
 		start_play_time = milliseconds_t(0);
-	dtdebug("Starting move_to_time");
-	auto txn = db->mpm_rec.idxdb.rtxn();
-	auto ret = open_(txn, start_play_time);
-	txn.abort();
+	dtdebugf("Starting move_to_time");
+	auto idxdb_txn = db->mpm_rec.idxdb.rtxn();
+	auto ret = open_(idxdb_txn, start_play_time);
+	idxdb_txn.abort();
 	return ret;
 }
 
@@ -354,7 +358,7 @@ int playback_mpm_t::move_to_live() {
 	fileno=-1 will be ignored; otherwise fileno is the fileno which should be opened
 */
 
-int playback_mpm_t::open_(db_txn& txn, milliseconds_t start_time) {
+int playback_mpm_t::open_(db_txn& idxdb_txn, milliseconds_t start_time) {
 	error = false;
 	bool current_file_ok = false;
 	{
@@ -362,16 +366,17 @@ int playback_mpm_t::open_(db_txn& txn, milliseconds_t start_time) {
 		current_file_ok = (filemap.fd >= 0 && start_time >= f->k.stream_time_start && start_time < f->stream_time_end &&
 											 f->stream_time_end != std::numeric_limits<milliseconds_t>::max());
 		if (current_file_ok) {
-			dtdebugx("Opening file which is already open file=%d", f->fileno);
+			dtdebugf("Opening file which is already open file={:d}", f->fileno);
 		}
 	}
 	int fd = filemap.fd;
 	if (!current_file_ok) {
 		// The desired data is not in the current file. Open the correct one and close our filemap
-		fd = open_file_containing_time(txn, start_time);
+		fd = open_file_containing_time(idxdb_txn, start_time);
 		if (fd < 0) { /* error*/
 			filemap.unmap();
 			filemap.close();
+			receiver.global_subscriber->notify_error(get_error()); //TODO: should be replaced by a "subscriber_notify+error"
 			return -1;
 		}
 	}
@@ -391,9 +396,9 @@ int playback_mpm_t::open_(db_txn& txn, milliseconds_t start_time) {
 		In case the opened file is still live, end_marker
 	*/
 	recdb::marker_t current_marker;
-	get_end_marker_from_db(txn, end_marker);
-	if (start_time >= end_marker.k.time || get_marker_for_time_from_db(txn, current_marker, start_time) < 0) {
-		dtdebugx("Requested start_play_time is beyond last logged packet");
+	get_end_marker_from_db(idxdb_txn, end_marker);
+	if (start_time >= end_marker.k.time || get_marker_for_time_from_db(idxdb_txn, current_marker, start_time) < 0) {
+		dtdebugf("Requested start_play_time is beyond last logged packet");
 		if (live_mpm) {
 			auto mm = live_mpm->meta_marker.readAccess();
 			if (start_time >= mm->current_marker.k.time) {
@@ -417,7 +422,7 @@ int playback_mpm_t::open_(db_txn& txn, milliseconds_t start_time) {
 		stream_packetno_end = f->stream_packetno_end;
 		if (stream_packetno_end == std::numeric_limits<int64_t>::max()) {
 			if (!live_mpm) {
-				dtdebugx("file %s was not properly closed", f->filename.c_str());
+				dtdebugf("file {} was not properly closed", f->filename);
 				stream_packetno_end = end_marker.packetno_end;
 				f->stream_packetno_end = stream_packetno_end;
 			}
@@ -468,7 +473,7 @@ int playback_mpm_t::open_(db_txn& txn, milliseconds_t start_time) {
 
 	auto start_byte_pos = start_packet * dtdemux::ts_packet_t::size;
 	if (!(current_byte_pos == start_byte_pos || current_byte_pos == 0)) {
-		dtdebugx("current_byte_pos=%ld start_byte_pos=%ld\n", current_byte_pos, start_byte_pos);
+		dtdebugf("current_byte_pos={:d} start_byte_pos={:d}", current_byte_pos, start_byte_pos);
 	}
 	current_byte_pos = start_byte_pos;
 
@@ -479,15 +484,15 @@ int playback_mpm_t::open_(db_txn& txn, milliseconds_t start_time) {
 	find the file part containing start_time, using database lookup only
 
 */
-int playback_mpm_t::open_file_containing_time(db_txn& txn, milliseconds_t start_time) {
+int playback_mpm_t::open_file_containing_time(db_txn& idxdb_txn, milliseconds_t start_time) {
 	error = false;
 	// find a file which starts at start_time, or if none exists, which contains start_time
 	using namespace recdb;
-	auto c = file_t::find_by_key(txn, file_key_t(start_time), find_leq); // largest start_time smaller than the desired
+	auto c = file_t::find_by_key(idxdb_txn, file_key_t(start_time), find_leq); // largest start_time smaller than the desired
 																																			 // one
 	if (!c.is_valid()) {
 		// this can only happen if file is corrupt
-		dterror("Could not find file corresponding to time " << milliseconds_t(start_time));
+		user_errorf("Could not find file corresponding to time {}", milliseconds_t(start_time));
 		return -1;
 	}
 
@@ -510,24 +515,24 @@ int playback_mpm_t::open_file_containing_time(db_txn& txn, milliseconds_t start_
 		}
 
 		if (currently_playing_file.readAccess()->k == r.k && filemap.fd >= 0) {
-			dtdebugx("This file fileno=%d is already open", filemap.fd);
+			dtdebugf("This file fileno={:d} is already open", filemap.fd);
 			fd = filemap.fd;
 		} else {
 			// current_filename  contains a relative path
 			current_filename.clear();
-			current_filename.sprintf("%s/%s", dirname.c_str(), r.filename.c_str());
+			current_filename.format("{:s}/{:s}", dirname, r.filename);
 		}
 		// open the file, setting fd>=0 on success, otherwise -1
 		for (; fd < 0;) {
-			dtdebugx("Opening %s", current_filename.c_str());
+			dtdebugf("Opening {}", current_filename);
 			fd = ::open(current_filename.c_str(), O_RDONLY);
 			if (fd < 0) {
 				if (errno == EINTR)
 					continue; // retry
 				if (errno == ENOENT) {
-					dtdebugx("File %s does not exist (may have been deleted; will try next one).", current_filename.c_str());
+					dtdebugf("File {} does not exist (may have been deleted; will try next one).", current_filename);
 				} else {
-					dtdebugx("Could not open data file %s: %s", current_filename.c_str(), strerror(errno));
+					dtdebugf("Could not open data file {}: {}", current_filename, strerror(errno));
 				}
 			}
 			break;
@@ -536,17 +541,17 @@ int playback_mpm_t::open_file_containing_time(db_txn& txn, milliseconds_t start_
 		if (fd >= 0) {
 			// store info about the currently playing file
 			currently_playing_file.assign(r);
-			dtdebugx("currently_playing_file.fileno=%d fd=%d", r.fileno, fd);
+			dtdebugf("currently_playing_file.fileno={:d} fd={:d}", r.fileno, fd);
 			break;
 		}
 	}
 	if (fd < 0) {
 		if (filemap.buffer) {
-			dtdebug("Could not open any data file; keeping current one");
+			dtdebugf("Could not open any data file; keeping current one");
 			// user wanted to move backward foward/ beyond what is available; it is best to preserve what we have
 			return filemap.fd;
 		} else {
-			dtdebug("Could not open any data file; returning error");
+			dtdebugf("Could not open any data file; returning error");
 			return fd;
 		}
 	}
@@ -559,12 +564,13 @@ int playback_mpm_t::open_file_containing_time(db_txn& txn, milliseconds_t start_
 */
 
 int playback_mpm_t::open_next_file() {
-	auto txn = db->mpm_rec.idxdb.rtxn();
+	auto idxdb_txn = db->mpm_rec.idxdb.rtxn();
 	// WRONG: assert(currently_playing_file.stream_time_end!= std::numeric_limits<milliseconds_t>::max());
 	// WRONG, e.g., if paused for a long time:
 	// assert(meta_marker.currently_playing_file.fileno == 1 + currently_playing_file.fileno);
 
-	auto ret = open_(txn, milliseconds_t(currently_playing_file.readAccess()->k.stream_time_start));
+	auto ret = open_(idxdb_txn, milliseconds_t(currently_playing_file.readAccess()->k.stream_time_start));
+	idxdb_txn.abort();
 	return ret;
 }
 
@@ -625,14 +631,13 @@ std::tuple<int, int> playback_mpm_t::read_data_(char* outbuffer, int outbytes, i
 			auto wtxn = db->mpm_rec.idxdb.wtxn();
 			get_end_marker_from_db(wtxn, end_marker);
 			auto f = currently_playing_file.writeAccess();
-			dtdebugx("file %s was not properly closed", f->filename.c_str());
+			dtdebugf("file {} was not properly closed", f->filename.c_str());
 			end_time = end_marker.k.time; //time of the very last info written into the file
 			f->stream_time_end = end_time;
 			f->stream_packetno_end = end_marker.packetno_end;
 			wtxn.commit();
 		}
-
-		auto txn = db->mpm_rec.idxdb.rtxn();
+		auto idxdb_txn = db->mpm_rec.idxdb.rtxn();
 		if ((int64_t)end_time == std::numeric_limits<int64_t>::max() && live_mpm) {
 				/* We must reread the database to find the correct end_time,  which will have been written
 					 by the service thread performing the writing
@@ -642,24 +647,24 @@ std::tuple<int, int> playback_mpm_t::read_data_(char* outbuffer, int outbytes, i
 #ifndef NDEBUG
 				auto fileno = currently_playing_file.readAccess()->fileno;
 #endif
-				auto c = file_t::find_by_key(txn, file_key_t(start_time), find_eq);
+				auto c = file_t::find_by_key(idxdb_txn, file_key_t(start_time), find_eq);
 				assert(c.is_valid());
 				auto r = c.current();
 				end_time = r.stream_time_end;
-				dtdebug("Reread end_time for current file: " << end_time);
+				dtdebugf("Reread end_time for current file: {}", end_time);
 				assert(fileno == r.fileno); //fails with r.fileno=2, fileno=1, stary_time=33914
 				assert(end_time != std::numeric_limits<milliseconds_t>::max());
-				dtdebugx("currently_playing_file.fileno=%d", r.fileno);
+				dtdebugf("currently_playing_file.fileno={:d}", r.fileno);
 				currently_playing_file.assign(c.current());
 			}
 
 		bool still_not_open = (int64_t)end_time == std::numeric_limits<int64_t>::max();
-		auto ret = still_not_open ? -1 : open_(txn, end_time);
-		txn.abort();
+		auto ret = still_not_open ? -1 : open_(idxdb_txn, end_time);
+		idxdb_txn.abort();
 		if(ret == 0 && live_mpm)
 			continue;
 		if (ret <= 0) { // end time of current file is start time of new one
-			dtdebug("Cannot open next part");
+			dtdebugf("Cannot open next part");
 			filemap.unmap();
 			filemap.close();
 			return {-1, -1};
@@ -737,7 +742,7 @@ int64_t playback_mpm_t::read_data(char* outbuffer, uint64_t num_bytes) {
 			As a workaround we send pmt bytes, which can be done in terms of a partial packets
 		*/
 		if (num_bytes_read ==0 && num_bytes < ts_packet_t::size) {
-			dtdebugx("Returning pmt data to fill partial packet");
+			dtdebugf("Returning pmt data to fill partial packet");
 			auto ls = stream_state.readAccess();
 			num_pmt_bytes_to_send =  preferred_streams_pmt_ts.size();
 			assert(num_pmt_bytes_to_send >= 0);
@@ -840,7 +845,7 @@ void playback_mpm_t::register_audio_changed_callback(subscription_id_t subscript
 	assert((int) subscription_id >= 0);
 	assert(cb != nullptr);
 	auto ls = stream_state.writeAccess();
-	dtdebugx("Register audio_changed_cb subscription_id=%d s=%d", (int) subscription_id,
+	dtdebugf("Register audio_changed_cb subscription_id={:d} s={:d}", (int) subscription_id,
 					 (int)ls->audio_language_change_callbacks.size());
 	ls->audio_language_change_callbacks[subscription_id] = cb;
 }
@@ -848,7 +853,7 @@ void playback_mpm_t::register_audio_changed_callback(subscription_id_t subscript
 void playback_mpm_t::unregister_audio_changed_callback(subscription_id_t subscription_id) {
 	assert((int) subscription_id >= 0);
 	auto ls = stream_state.writeAccess();
-	dtdebugx("Unregister audio_changed_cb subscription_id=%d s=%d", (int) subscription_id,
+	dtdebugf("Unregister audio_changed_cb subscription_id={:d} s={:d}", (int) subscription_id,
 					 (int)ls->audio_language_change_callbacks.size());
 	ls->audio_language_change_callbacks.erase(subscription_id);
 }
@@ -857,7 +862,7 @@ void playback_mpm_t::register_subtitle_changed_callback(subscription_id_t subscr
 	assert((int) subscription_id >= 0);
 	assert(cb != nullptr);
 	auto ls = stream_state.writeAccess();
-	dtdebugx("Register subtitle_changed_cb subscription_id=%d s=%d", (int) subscription_id,
+	dtdebugf("Register subtitle_changed_cb subscription_id={:d} s={:d}", (int) subscription_id,
 					 (int)ls->subtitle_language_change_callbacks.size());
 
 	ls->subtitle_language_change_callbacks[subscription_id] = cb;
@@ -866,7 +871,7 @@ void playback_mpm_t::register_subtitle_changed_callback(subscription_id_t subscr
 void playback_mpm_t::unregister_subtitle_changed_callback(subscription_id_t subscription_id) {
 	assert((int) subscription_id >= 0);
 	auto ls = stream_state.writeAccess();
-	dtdebugx("Unregister subtitle_changed_cb subscription_id=%d s=%d", (int) subscription_id,
+	dtdebugf("Unregister subtitle_changed_cb subscription_id={:d} s={:d}", (int) subscription_id,
 					 (int)ls->subtitle_language_change_callbacks.size());
 	ls->subtitle_language_change_callbacks.erase(subscription_id);
 }
@@ -903,19 +908,19 @@ int playback_mpm_t::get_end_marker_from_db(db_txn& txn, recdb::marker_t& end_mar
 	using namespace recdb;
 	auto c = find_last<recdb::marker_t>(txn);
 	if (!c.is_valid()) {
-		dterror("Could not obtain last marker");
+		dterrorf("Could not obtain last marker");
 		return -1;
 	}
 	end_marker = c.current();
 	return 0;
 }
 
-int playback_mpm_t::get_marker_for_time_from_db(db_txn& txn, recdb::marker_t& current_marker,
+int playback_mpm_t::get_marker_for_time_from_db(db_txn& idxdb_txn, recdb::marker_t& current_marker,
 																								milliseconds_t start_play_time) {
 
-	auto c = recdb::marker_t::find_by_key(txn, recdb::marker_key_t(start_play_time), find_geq);
+	auto c = recdb::marker_t::find_by_key(idxdb_txn, recdb::marker_key_t(start_play_time), find_geq);
 	if (!c.is_valid()) {
-		dtdebug("Could not obtain marker for time " << start_play_time);
+		dtdebugf("Could not obtain marker for time {}", start_play_time);
 		return -1;
 	}
 	current_marker = c.current();

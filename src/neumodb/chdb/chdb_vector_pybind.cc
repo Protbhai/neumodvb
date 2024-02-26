@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -28,10 +28,12 @@ namespace py = pybind11;
 void export_chdb_vectors(py::module& m) {
 	using namespace chdb;
 	export_ss_vector(m, service_t);
+	export_ss_vector(m, band_scan_t);
 	export_ss_vector(m, dvbs_mux_t);
 	export_ss_vector(m, dvbc_mux_t);
 	export_ss_vector(m, dvbt_mux_t);
 	export_ss_vector(m, language_code_t);
 	export_ss_vector(m, sat_t);
 	export_ss_vector(m, epg_type_t);
+	export_ss_vector(m, fe_polarisation_t);
 }

@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -325,16 +325,13 @@ bool screen_t<record_t>::update_if_matches(db_txn& from_txn, 	function_view<bool
 			//using namespace epgdb;
 			//using namespace recdb;
 		c.get_value(record);
-		ss::string<32> rec_check;  to_str(rec_check, record);
-		printf("BAD from_txn=%ld %s ref_row=%d\n", txnid_check, rec_check.c_str(), monitor.reference.row_number);
+		ss::string<32> rec_check;
+		rec_check.format("{}", record);
+		printf("BAD from_txn=%ld %s ref_row={:d}\n", txnid_check, rec_check.c_str(), monitor.reference.row_number);
 #endif
 
 			continue; //we do not need this record (e.g., epg for wrong service
 		}
-		//c.get_value(record);
-
-		//printf ("SEC[%ld]  ", txnid_check);print_hex(x);
-		//printf ("PRIM[%ld] ", txnid_check);print_hex(primary_key);
 
 		if(!has_been_deleted) {
 			auto found = c.get_value(record);
@@ -346,8 +343,9 @@ bool screen_t<record_t>::update_if_matches(db_txn& from_txn, 	function_view<bool
 			count++;
 #ifdef DEBUG_PRINT
 
-		ss::string<32> rec_check;  to_str(rec_check, record);
-				printf("from_txn=%ld %s ref_row=%d\n", txnid_check, rec_check.c_str(), monitor.reference.row_number);
+		ss::string<32> rec_check;
+		rec_check.format("{}", record);
+		printf("from_txn=%ld %s ref_row={:d}\n", txnid_check, rec_check.c_str(), monitor.reference.row_number);
 #endif
 		} else {
 				delete_screen_record(to_cursor, primary_key);
@@ -355,7 +353,7 @@ bool screen_t<record_t>::update_if_matches(db_txn& from_txn, 	function_view<bool
 		}
 	}
 #if 0
-	printf("result: txn=%d -> %d changed=%d moved=%d resized=%d\n",
+	printf("result: txn={:d} -> {:d} changed={:d} moved={:d} resized={:d}\n",
 				 monitor.txn_id,  from_txn.txn_id(),
 				 monitor.state.screen_content_changed, monitor.state.content_moved,
 				 old_list_size != list_size);
@@ -369,12 +367,22 @@ bool screen_t<record_t>::update_if_matches(db_txn& from_txn, 	function_view<bool
 template <typename record_t>
 bool screen_t<record_t>::update(db_txn& from_txn)
 {
-
-	auto match_fn = [](const record_t& record) {
+	auto all_match_fn = [](const record_t& record) {
 		return true;
 	};
 
-	return screen_t<record_t>::update_if_matches(from_txn, match_fn);
+	auto * match_data = this->field_matchers.size() > 0 ?  & this->match_data : nullptr;
+	auto * match_data2 = this->field_matchers2.size() > 0 ?  & this->match_data2 : nullptr;
+
+	if (!match_data && !match_data2)
+		return screen_t<record_t>::update_if_matches(from_txn, all_match_fn);
+	else {
+		auto some_match_fn = [this, &match_data, &match_data2](const record_t& record) {
+			return (!match_data || matches(record, *match_data, field_matchers)) &&
+				(!match_data2 || matches(record, *match_data2, field_matchers2));
+		};
+		return screen_t<record_t>::update_if_matches(from_txn, some_match_fn);
+	}
 }
 
 /*
@@ -480,7 +488,7 @@ int screen_t<record_t>::set_reference(const record_t& record)
 				return rowno;
 			}
 	}
-	dterror("Asked for row number of non-existent record");
+	dterrorf("Asked for row number of non-existent record");
 	return -1;
 }
 
@@ -550,7 +558,7 @@ int screen_t<record_t>::set_reference(int row_number)
 
 	int count= reference->row_number;
 	if(std::abs(row_number - count)>=large_jump_threshold) {
-		dtdebugx("LARGE JUMP: %d -> %d aux=%d\n",  count, row_number, reference == &monitor.auxiliary_reference);
+		dtdebugf("LARGE JUMP: {} -> {} aux={}",  count, row_number, reference == &monitor.auxiliary_reference);
 	}
 	if(row_number >= count) {
 		for(;c.is_valid(); c.next()) {
@@ -589,17 +597,35 @@ template <typename record_t>
 screen_t<record_t>::screen_t
 (db_txn& txn, std::shared_ptr<neumodb_t>& tmpdb, uint32_t sort_order_,
  typename record_t::partial_keys_t key_prefix_type_,
- const record_t *key_prefix_data_, const record_t* lower_limit_
+ const record_t *key_prefix_data_, const record_t* lower_limit_,
  #ifdef USE_END_TIME
- , const record_t* upper_limit_
+ const record_t* upper_limit_,
  #endif
-	) :
-	screen_t(dynamic_key_t(sort_order_), key_prefix_type_, key_prefix_data_, lower_limit_
+ const ss::vector_<field_matcher_t>* field_matchers_,
+ const record_t* match_data_,
+ const ss::vector_<field_matcher_t>* field_matchers2_,
+ const record_t* match_data2_) :
+	screen_t(dynamic_key_t(sort_order_), key_prefix_type_, key_prefix_data_,
+					 lower_limit_
 #ifdef USE_END_TIME
 					 , upper_limit_
 #endif
 		)
 {
+	if(field_matchers_) {
+		field_matchers = *field_matchers_;
+		assert(match_data_);
+		match_data = *match_data_;
+	} else {
+		assert(!match_data_);
+	}
+	if(field_matchers2_) {
+		field_matchers2 = *field_matchers2_;
+		assert(match_data2_);
+		match_data2 = *match_data2_;
+	} else {
+		assert(!match_data2_);
+	}
 	this->init(txn, tmpdb, -1, 0);
 }
 

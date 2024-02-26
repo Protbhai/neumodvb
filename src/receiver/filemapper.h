@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -130,18 +130,18 @@ mmap_t(int map_len_, bool readonly_)
 		map_len(map_len_ -map_len_ % pagesize) {
 	}
 
-	void unmap();
+	EXPORT void unmap();
 
 	/* map a new file
 	 */
 	bool init(int _fd, off_t _offset, off_t end_read_offset=-1);
 
-	/*map a different segment of teh current file to a new offset; change filesize as needed*/
+	/*map a different segment of the current file to a new offset; change filesize as needed*/
 	int move_map(off_t _offset);
 
 	int grow_map(off_t end_read_offset);
 
-	void close();
+	EXPORT void close();
 
 	mmap_t& operator=(const mmap_t& other);
 	mmap_t& operator=(mmap_t&& other);

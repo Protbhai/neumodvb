@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -53,7 +53,7 @@ static const fs::path get_config_path() {
 		p = p.parent_path();
 	}
 
-	return "/etc/neumodvb/config";
+	return "/etc/neumodvb";
 }
 
 fs::path config_path{get_config_path()};
@@ -65,7 +65,7 @@ bool mkpath(const char* path) {
 	std::error_code ec;
 	auto ret = fs::create_directories(path, ec);
 	if (ec) {
-		dterror("mkpath " << path << " failed: " << ec.message());
+		dterrorf("mkpath {} failed: {}", path, ec.message());
 	}
 	return !ec;
 }
@@ -77,7 +77,7 @@ bool rmpath(const char* path) {
 	std::error_code ec;
 	bool ret = std::filesystem::remove_all(path, ec);
 	if (ec)
-		dterror("Error deleting " << path << ":" << ec.message());
+		dterrorf("Error deleting {}: {}", path, ec.message());
 	return ret;
 }
 
@@ -92,7 +92,7 @@ bool file_exists(char* fname) {
 void event_handle_t::init() {
 	_fd = ::eventfd(0, EFD_CLOEXEC|EFD_NONBLOCK);
 	if (_fd < 0) {
-		LOG4CXX_ERROR(logger, "error creating eventfd:" << strerror(errno));
+		dterrorf("error creating eventfd: {}", strerror(errno));
 	}
 }
 
@@ -105,7 +105,7 @@ void event_handle_t::unblock(uint64_t val) {
 		// already unblocked
 	}
 	if (::write(_fd, &val, sizeof(uint64_t)) != sizeof(uint64_t)) {
-		LOG4CXX_ERROR(logger, "Error writing eventfd:" << strerror(errno));
+		dterrorf("Error writing eventfd: {}", strerror(errno));
 	}
 }
 
@@ -119,10 +119,12 @@ int event_handle_t::reset() {
 	uint64_t u = 0;
 	auto ret= ::read(_fd, &u, sizeof(uint64_t));
 	if (ret != sizeof(uint64_t)) {
-		if(ret==EWOULDBLOCK)
-			LOG4CXX_ERROR(logger, "Spurious wakeup event fd=" << _fd);
-		else
-			LOG4CXX_ERROR(logger, "Error reading eventfd: " << strerror(errno));
+		if(errno==EWOULDBLOCK || errno==EAGAIN) {
+#if 0
+			dterrorf("Spurious wakeup event fd={}", _fd);
+#endif
+		} else
+			dterrorf("Error reading eventfd: {}", strerror(errno));
 	}
 	return u;
 }
@@ -164,7 +166,9 @@ int epoll_t::add_fd(int fd, int mask) {
 	ev.events = mask;
 	int s = epoll_ctl(_fd, EPOLL_CTL_ADD, fd, &ev);
 	if (s == -1) {
-		LOG4CXX_FATAL(logger, "epoll_ctl add failed: _fd=" << (int)_fd << " fd=" << (int)fd <<" "  << strerror(errno));
+		auto msg= fmt::format("epoll_ctl add failed: _fd={} fd={} {}",
+													(int)_fd, (int)fd, strerror(errno));
+		LOG4CXX_FATAL(logger, msg);
 		return -1;
 	}
 	return 0;
@@ -219,7 +223,7 @@ int epoll_t::wait(struct epoll_event* events, int maxevents, int timeout) {
 				//LOG4CXX_DEBUG(logger, "epoll_wait was interrupted");
 				continue;
 			} else {
-				LOG4CXX_ERROR(logger, "epoll_pwait failed: " << strerror(errno));
+				dterrorf("epoll_pwait failed: {}", strerror(errno));
 				return -1;
 			}
 		} else
@@ -247,7 +251,7 @@ int force_close(int fd) {
 		if (ret == 0)
 			return ret;
 		else if (ret < 0 && errno != EINTR) {
-			LOG4CXX_ERROR(logger, "Error while closing fd=" << fd << " :" << strerror(errno));
+			dterrorf("Error while closing fd={}: {}", fd, strerror(errno));
 			return ret;
 		}
 	}
@@ -256,13 +260,13 @@ int force_close(int fd) {
 off_t filesize_fd(int fd) {
 	struct stat st;
 	if (fstat(fd, &st)) {
-		LOG4CXX_ERROR(logger, "stat failed: " << strerror(errno));
+		dterrorf("stat failed: {}", strerror(errno));
 		return -1;
 	}
 	return st.st_size;
 }
 
-int timer_start(double period_sec) {
+int periodic_timer_create_and_start(double period_sec) {
 	int fd = timerfd_create(CLOCK_MONOTONIC, 0);
 	struct itimerspec new_value {};
 
@@ -277,10 +281,29 @@ int timer_start(double period_sec) {
 	struct itimerspec* old_value = NULL; // returns time to expiration + period
 	int ret = timerfd_settime(fd, flags, &new_value, old_value);
 	if (ret < 0) {
-		dterrorx("could not create timerfd: %s\n", strerror(errno));
+		dterrorf("could not create timerfd: {}", strerror(errno));
 		return -1;
 	}
 	return fd;
+}
+
+int timer_set_once(int fd, double expiration_sec) {
+	struct itimerspec new_value {};
+
+	auto dur = std::chrono::duration<double>(expiration_sec);
+	auto secs = std::chrono::duration_cast<std::chrono::seconds>(dur);
+	dur -= secs;
+	new_value.it_value.tv_sec = secs.count();
+	new_value.it_value.tv_nsec = std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count();
+	new_value.it_interval.tv_sec = 0;
+	new_value.it_interval.tv_nsec = 0;
+	int flags = 0;
+	struct itimerspec* old_value = NULL; // returns time to expiration + period
+	int ret = timerfd_settime(fd, flags, &new_value, old_value);
+	if (ret < 0) {
+		dterrorf("could not create timerfd: {}", strerror(errno));
+	}
+	return ret;
 }
 
 int timer_set_period(int fd, double period_sec) {
@@ -297,7 +320,7 @@ int timer_set_period(int fd, double period_sec) {
 	struct itimerspec* old_value = NULL; // returns time to expiration + period
 	int ret = timerfd_settime(fd, flags, &new_value, old_value);
 	if (ret < 0) {
-		dterrorx("could not create timerfd: %s\n", strerror(errno));
+		dterrorf("could not create timerfd: {}", strerror(errno));
 		return -1;
 	}
 	return fd;
@@ -309,7 +332,7 @@ int timer_stop(int fd) {
 	struct itimerspec* old_value = NULL; // returns time to expiration + period
 	int ret = timerfd_settime(fd, flags, &new_value, old_value);
 	if (ret < 0) {
-		dterrorx("could not stop timerfd: %s\n", strerror(errno));
+		dterrorf("could not stop timerfd: {}", strerror(errno));
 		return -1;
 	}
 	while (ret) {
@@ -318,7 +341,7 @@ int timer_stop(int fd) {
 			break;
 	}
 	if (ret < 0) {
-		dterrorx("could not stop timerfd: %s\n", strerror(errno));
+		dterrorf("could not stop timerfd: {}", strerror(errno));
 		return -1;
 	}
 	return ret;
@@ -406,7 +429,10 @@ extern "C" {
 void __dtassert_fail(const char * assertion, const char * file, unsigned int line, const char * function)
 	__THROW
 {
-	fprintf(stderr, "AssertX: %s failed at %s:%d in function %s\n", assertion, file, line, function);
+	char msg[256];
+	snprintf(msg, sizeof(msg)-1, "Assert: %s failed at %s:%d in function %s", assertion, file, line, function);
+	fprintf(stderr, "%s\n", msg);
+	LOG4CXX_ERROR(logger, msg);
 	raise(SIGTRAP);
 	//__builtin_trap();
 					//else

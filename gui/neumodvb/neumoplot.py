@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -35,6 +35,7 @@ import warnings
 
 import mpl_scatter_density # adds projection='scatter_density'
 from matplotlib.colors import LinearSegmentedColormap
+from neumodvb.scanstatus import ScanStatusTextCtrl
 
 import numpy as np
 
@@ -329,7 +330,7 @@ class Spectrum(object):
         """
         Fit a linear curve to the minima of spectral intervals of the spectrum in spec
         The parameters of the polynomial are fit between lowidx and highidx indices. This allow excluding
-        part of the spectrum near 11700Ghz in a KU spectrum. Near that frequency it is difficult to know
+        part of the spectrum near 11700Ghz in a Ku spectrum. Near that frequency it is difficult to know
         for sure if the spectrum is from the low or high lnb band (which may have an offset in its local
         oscillator)
         """
@@ -489,6 +490,7 @@ class SpectrumPlot(wx.Panel):
         self.add_detrend_button()
         self.add_status_box()
         self.mux_creator = None
+        self.scan_status_text_ = None
         wx.CallAfter(self.compute_annot_scale_factors)
 
     def add_drawn_mux(self, freq, pol, symbol_rate):
@@ -544,7 +546,7 @@ class SpectrumPlot(wx.Panel):
         self.axes.spines['right'].set_visible(False)
         self.axes.spines['top'].set_visible(False)
         self.axes.set_ylabel('dB')
-        self.axes.set_xlabel('Frequency (Mhz)')
+        self.axes.set_xlabel('Frequency (MHz)')
         xlimits, ylimits = self.get_limits()
         self.axes.set_xlim(xlimits)
         self.canvas.draw()
@@ -561,10 +563,31 @@ class SpectrumPlot(wx.Panel):
         self.Bind(wx.EVT_TOGGLEBUTTON, self.OnToggleDetrend, button)
 
     def add_status_box(self) :
+        self.font_dc = wx.ScreenDC()
+        w,h = self.font_dc.GetTextExtent("10745.160MHz ")
+        self.SetMinSize((w,-1))
         self.status_box = wx.StaticText(self, -1)
         self.toolbar_sizer.Add(self.status_box, 0, wx.LEFT|wx.RIGHT|wx.ALIGN_CENTER|wx.EXPAND, 10)
         self.canvas.mpl_connect('motion_notify_event', self.UpdateStatusBar)
         self.canvas.Bind(wx.EVT_ENTER_WINDOW, self.ChangeCursor)
+
+    def end_scan(self):
+        if self.scan_status_text_ is not None:
+            self.scan_status_text_.scan_in_progress = False
+
+    @property
+    def scan_status_text(self) :
+        if self.scan_status_text_ is None:
+            w,h = self.font_dc.GetTextExtent("10745.160MHz ")
+            self.scan_status_text_ = ScanStatusTextCtrl(self, wx.ID_ANY, "",
+                                                        style=wx.TE_MULTILINE | wx.TE_NO_VSCROLL |
+                                                        wx.TE_READONLY | wx.TE_RICH)
+            self.toolbar_sizer.Add(self.scan_status_text_, 1, wx.LEFT|wx.RIGHT|wx.ALIGN_CENTER|wx.EXPAND, 10)
+            self.Layout()
+        return self.scan_status_text_
+    def set_scan_status(self, scan_status):
+        self.add_scan_status_box()
+        self.scan_status_text.ShowScanRecord(scan_status)
 
     def ChangeCursor(self, event):
         self.canvas.SetCursor(wx.Cursor(wx.CURSOR_CROSS))
@@ -576,7 +599,19 @@ class SpectrumPlot(wx.Panel):
 
     def add_legend_button(self, spectrum, color) :
         panel = wx.Panel(self, wx.ID_ANY, style=wx.BORDER_SUNKEN)
-        self.toolbar_sizer.Add(panel, 0, wx.LEFT|wx.RIGHT, 10)
+        if self.scan_status_text_ is None:
+            self.toolbar_sizer.Add(panel, 0, wx.LEFT|wx.RIGHT, 10)
+        else:
+            idx = len(self.toolbar_sizer.GetChildren()) -1
+            self.toolbar_sizer.Remove(idx)
+            self.toolbar_sizer.Add(panel, 0, wx.LEFT|wx.RIGHT, 10)
+            if self.scan_status_text_:
+                if self.scan_status_text_.scan_in_progress:
+                    self.toolbar_sizer.Add(self.scan_status_text_, 1, wx.LEFT|wx.RIGHT|wx.ALIGN_CENTER|wx.EXPAND, 10)
+                else:
+                    self.scan_status_text_.Destroy()
+                    self.scan_status_text_=None
+
         sizer = wx.FlexGridSizer(3, 1, 0)
         static_line = wx.StaticLine(panel, wx.ID_ANY)
         static_line.SetMinSize((20, 2))
@@ -604,7 +639,9 @@ class SpectrumPlot(wx.Panel):
         spectrum.legend_panel = panel
 
     def make_key(self, spectrum):
-        return str(spectrum.k)
+        from neumodvb.util import lastdot
+        k = spectrum.k
+        return f'{k}'
 
     def toggle_spectrum(self, spectrum):
         key = self.make_key(spectrum)
@@ -683,6 +720,9 @@ class SpectrumPlot(wx.Panel):
         if s is None:
             return
         s.legend_panel.Destroy()
+        if self.scan_status_text_ is not None and not self.scan_status_text_.scan_in_progress:
+            self.scan_status_text_.Destroy()
+            self.scan_status_text_ = None
         self.toolbar_sizer.Layout()
         s.clear()
         del self.spectra[key]

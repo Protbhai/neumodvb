@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -76,7 +76,7 @@ class LnbConnectionTable(NeumoTable):
          CD(key='can_be_used',   label='avail\nable', basic=False),
          CD(key='priority',  label='prio'),
          CD(key='rf_coupler_id',  label='rf\ncoupler', basic=False),
-         CD(key='rotor_control',  label='rotor', basic=False, dfn=lambda x: lastdot(x[1]), example='ROTOR Master USALS'),
+         CD(key='rotor_control',  label='rotor\ncontrol', basic=False, dfn=lambda x: lastdot(x[1]), example='ROTOR Master USALS'),
          CD(key='diseqc_10',  label='diseqc\n10'),
          CD(key='diseqc_11',  label='diseqc\n11'),
          #CD(key='diseqc_mini',  label='diseqc\nmini'),
@@ -113,9 +113,6 @@ class LnbConnectionTable(NeumoTable):
     def lnb_connection(self, val):
         if hasattr(self.parent, "lnb_connection"):
             self.parent.lnb_connection = val
-
-    def InitialRecord(self):
-        return self.lnb_connection
 
     def screen_getter(self, txn, sort_field):
         """
@@ -185,6 +182,9 @@ class LnbConnectionGrid(NeumoGridBase):
         ])
         self.EnableEditing(self.app.frame.edit_mode)
 
+    def InitialRecord(self):
+        return self.table.lnb_connection
+
     def OnDone(self, evt):
         #@todo(). When a new record has been inserted and connection has been changed, and then user clicks "done"
         #this is not seen as a change, because the editor has not yet saved itself
@@ -222,6 +222,13 @@ class LnbConnectionGrid(NeumoGridBase):
         self.app.frame.SetEditMode(True)
         self.EnableEditing(self.app.frame.edit_mode)
         return super().OnNew(evt)
+
+    def CmdNew(self, event):
+        dtdebug("CmdNew")
+        f = wx.GetApp().frame
+        if not f.edit_mode:
+            f.SetEditMode(True)
+        self.OnNew(event)
 
     def OnEditMode(self, evt):
         dtdebug(f'old_mode={self.app.frame.edit_mode}')

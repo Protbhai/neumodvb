@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -22,14 +22,9 @@
 #include "recdb_extra.h"
 #include "../chdb/chdb_extra.h"
 #include "../epgdb/epgdb_extra.h"
-#include "date/date.h"
-#include "date/iso_week.h"
-#include "date/tz.h"
-#include "xformat/ioformat.h"
+#include <fmt/chrono.h>
 #include "neumotime.h"
 
-using namespace date;
-using namespace date::clock_cast_detail;
 using namespace recdb;
 
 static int overlapping(time_t s1, time_t e1, time_t s2, time_t e2) {
@@ -45,60 +40,9 @@ static int overlapping(time_t s1, time_t e1, time_t s2, time_t e2) {
 	return 0;
 }
 
-std::ostream& recdb::operator<<(std::ostream& os, const marker_key_t& k) {
-	os << k.time;
-	return os;
-}
-
-std::ostream& recdb::operator<<(std::ostream& os, const marker_t& m) {
-	os << m.k.time;
-	stdex::printf(os, " packets=[%ld - %ld]", m.packetno_start, m.packetno_end);
-	return os;
-}
-
-std::ostream& recdb::operator<<(std::ostream& os, const file_t& f) {
-	stdex::printf(os, "file %d; stream time: [", f.fileno);
-	os << f.k.stream_time_start << " - " << f.stream_time_end;
-	os << "] real time: [";
-	os << date::format("%F %H:%M", zoned_time(current_zone(), system_clock::from_time_t(f.real_time_start)));
-	os << " - ";
-	os << date::format("%H:%M", zoned_time(current_zone(), system_clock::from_time_t(f.real_time_end)));
-	stdex::printf(os, " packets=[%ld - %ld]", f.stream_packetno_start, f.stream_packetno_end);
-	return os;
-}
-
-std::ostream& recdb::operator<<(std::ostream& os, const rec_fragment_t& f) {
-	os << "stream time: [" << f.play_time_start << " - " << f.play_time_end << "] play time: [" << f.stream_time_start
-		 << " - " << f.stream_time_end << "]";
-	return os;
-}
-
-std::ostream& recdb::operator<<(std::ostream& os, const rec_t& r) {
-	os << r.service;
-	os << "\n        ";
-	os << r.epg
-		 << "\nstream time: [" << r.stream_time_start << " - " << r.stream_time_end << "]\n  real time: ["
-		 << date::format("%F %H:%M", zoned_time(current_zone(), system_clock::from_time_t(r.real_time_start))) << " - "
-		 << date::format("%H:%M", zoned_time(current_zone(), system_clock::from_time_t(r.real_time_end)));
-	stdex::printf(os, "]\n");
-	os << "\n" << r.filename;
-	return os;
-}
-
-void recdb::to_str(ss::string_& ret, const marker_key_t& k) { ret << k.time; }
-
-void recdb::to_str(ss::string_& ret, const marker_t& m) { ret << m; }
-
-void recdb::to_str(ss::string_& ret, const file_t& f) { ret << f; }
-
-void recdb::to_str(ss::string_& ret, const rec_fragment_t& f) { ret << f; }
-
-void recdb::to_str(ss::string_& ret, const rec_t& r) { ret << r; }
-
 /*!
 	returns best matching recording recording, taking into account differences
 	in start time due to changed epg records; we require there to be overlap!
-
 */
 std::optional<recdb::rec_t> recdb::rec::best_matching(db_txn& txn, const epgdb::epg_record_t& epg_,
 																											bool anonymous) {
@@ -153,14 +97,131 @@ std::optional<recdb::rec_t> recdb::rec::best_matching(db_txn& txn, const epgdb::
 	create a file name for a recording
 */
 void recdb::rec::make_filename(ss::string_& ret, const chdb::service_t& s, const epgdb::epg_record_t& epg) {
-	using namespace std::chrono;
-	using namespace date;
-	using namespace iso_week;
-	ss::accu_t ss(ret);
-	ss << epg.event_name << " - " << s.name << " - "
-		 << date::format("%F %H:%M", zoned_time(current_zone(), system_clock::from_time_t(epg.k.start_time)));
+	ret.format("{} - {} - {:%F %H:%M}", epg.event_name, s.name, fmt::localtime(epg.k.start_time));
 	for (auto& c : ret) {
 		if (c == '/' || c == '\\' || iscntrl(c) || !c)
 			c = ' ';
 	}
+}
+
+
+int32_t recdb::make_unique_id(db_txn& txn, autorec_t& autorec)
+{
+	if(autorec.id >=0)
+		return autorec.id;
+	int32_t id = std::numeric_limits<int32_t>::max();
+	while (id > 0) {
+		auto c = recdb::autorec_t::find_by_key(txn, id, find_leq);
+		if (c.is_valid()) {
+			auto largest = c.current();
+			if(largest.id + 1  < id) {
+				autorec.id = largest.id + 1;
+				return autorec.id;
+			}
+			/*at this stage the top range of ids is fully
+				used. We move towards lower ids looking for a gap
+			 */
+			id = largest.id - 1;
+			if(!c.prev()) {
+				assert(0);
+				break; //we failed
+			}
+		} else {
+			autorec.id = 1; //initialisation
+			return autorec.id;
+		}
+	}
+	assert(0);
+	return -1;
+}
+
+
+
+recdb::rec_t recdb::new_recording(db_txn& rec_wtxn, const chdb::service_t& service,
+																					epgdb::epg_record_t& epgrec, int pre_record_time, int post_record_time) {
+	auto stream_time_start = milliseconds_t(0);
+	auto stream_time_end = stream_time_start;
+
+	// TODO: times in start_play_time may have a different sign than stream_times (which can be both negative and
+	// positive)
+	using namespace recdb;
+	time_t real_time_start = 0;
+	// real_time end will determine when epg recording will be stopped
+	time_t real_time_end = 0;
+	subscription_id_t subscription_id = subscription_id_t{-1};
+	using namespace recdb;
+	using namespace recdb::rec;
+	ss::string<256> filename;
+
+	const auto rec_type = rec_type_t::RECORDING;
+	assert(epgrec.rec_status != epgdb::rec_status_t::IN_PROGRESS);
+
+	epgrec.rec_status = epgdb::rec_status_t::SCHEDULED;
+	auto rec = rec_t(rec_type, -1 /*owner*/, (int)subscription_id, stream_time_start, stream_time_end,
+									 real_time_start, real_time_end,
+									 pre_record_time, post_record_time, filename, service, epgrec, {});
+	put_record(rec_wtxn, rec);
+
+	return rec;
+}
+
+/*
+	make and insert a new recording into the global recording database
+*/
+recdb::rec_t recdb::new_recording(db_txn& rec_wtxn, db_txn& epg_wtxn,
+																					const chdb::service_t& service, epgdb::epg_record_t& epgrec,
+																	int pre_record_time, int post_record_time) {
+	auto ret = new_recording(rec_wtxn, service, epgrec, pre_record_time, post_record_time);
+
+	// update epgdb.mdb so that gui code can see the record
+	auto c = epgdb::epg_record_t::find_by_key(epg_wtxn, epgrec.k);
+	if (c.is_valid()) {
+		assert(epgrec.k.anonymous == (epgrec.k.event_id == TEMPLATE_EVENT_ID));
+		epgdb::update_record_at_cursor(c, epgrec);
+	}
+	return ret;
+}
+
+
+
+fmt::format_context::iterator
+fmt::formatter<marker_key_t>::format(const marker_key_t& k, format_context& ctx) const {
+	return fmt::format_to(ctx.out(), "{}",  k.time);
+}
+
+fmt::format_context::iterator
+fmt::formatter<marker_t>::format(const marker_t& m, format_context& ctx) const {
+	return fmt::format_to(ctx.out(), "{} packets=[{:d} - {:d}]", m.k.time,
+								 m.packetno_start, m.packetno_end);
+}
+
+fmt::format_context::iterator
+fmt::formatter<file_t>::format(const file_t& f, format_context& ctx) const {
+	return fmt::format_to(ctx.out(), "file {:d}; stream time: [{} - {}]"
+								 "real time: [{:%F %H:%M} - {:%H:%M}"
+								 " packets=[{:d} - {:d}]",
+								 f.fileno, f.k.stream_time_start, f.stream_time_end,
+								 fmt::localtime(f.real_time_start),  fmt::localtime(f.real_time_end),
+								 f.stream_packetno_start, f.stream_packetno_end);
+}
+
+fmt::format_context::iterator
+fmt::formatter<rec_fragment_t>::format(const rec_fragment_t& f, format_context& ctx) const {
+	return fmt::format_to(ctx.out(),
+												"stream time: [{} - {}]"
+												"play time: [{} - {}]",
+												f.play_time_start, f.play_time_end,
+												f.stream_time_start, f.stream_time_end);
+}
+
+fmt::format_context::iterator
+fmt::formatter<rec_t>::format(const rec_t& r, format_context& ctx) const {
+	return fmt::format_to(ctx.out(),
+												"{}\n        {}\n"
+												"nstream time: [{} - {}]\n"
+												"real time: [{:%F %H:%M} - {:%H:%M}]]\n",
+												r.service, r.epg,
+												r.stream_time_start, r.stream_time_end,
+												fmt::localtime(r.real_time_start), fmt::localtime(r.real_time_end),
+												r.filename);
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -32,6 +32,14 @@ def enum_labels(field):
      for k in getattr(field, '__entries').keys():
           ret.append(k.replace('_', ' '))
      return ret
+
+def enum_values_and_labels(field):
+     from collections import OrderedDict
+     ret = OrderedDict()
+     for k in getattr(field, '__entries').keys():
+          ret[getattr(field,k)] = k.replace('_', ' ')
+     return ret
+
 def enum_value_for_label(enum, label):
      a = getattr(enum, '__entries')
      if label in a:

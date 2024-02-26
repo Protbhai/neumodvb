@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -29,4 +29,5 @@ void export_subscriber(py::module &m);
 
 void export_scan_report(py::module &m);
 void export_signal_info(py::module &m);
+void export_position_motion_report(py::module &m);
 void export_sdt_data(py::module &m);

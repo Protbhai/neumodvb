@@ -1,3 +1,20 @@
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
+# Copyright notice:
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+#
 from collections import OrderedDict
 from pprint import pformat
 from jinja2 import Template, Environment, FileSystemLoader, PackageLoader, select_autoescape
@@ -90,17 +107,20 @@ class db_enum(object):
         for field in fields:
             if type(field) == str:
                 field = (field, None, None)
-            if len(field) == 2:
+            if type(field) == tuple and len(field) == 2:
                 field =(*field, None)
             self.add(*field)
         prefix = os.path.commonprefix([value['name'] for value in self.values])
+        if not prefix.endswith('_'):
+            prefix=""
         for value in self.values:
             short_name = re.sub('^{}'.format(prefix), '', value['name'])
-            #short_name = multi_replace(short_name, replace)
             value['short_name'] = short_name
+            if value['display_name'] is None:
+                value['display_name']= short_name
 
     def add(self, name, val=None, display_name=None):
-        self.values.append(dict(name=name, val=val, display_name= name if display_name is None else display_name))
+        self.values.append(dict(name=name, val=val, display_name=display_name))
 
     def __repr__(self):
         return "enum {}\n{}".format(self.name, pformat(self.values))
@@ -174,11 +194,13 @@ class db_struct(object):
         assert type(_name) == str
         assert _default is None or type(_default) == str or type(_default) == int
         match_variant = re.match(r'(std::variant)(<((?:(?>[^<>]+)|(?2))*)>)', _type)
+        match_optional = re.match(r'(std::optional)(<((?:(?>[^<>]+)|(?2))*)>)', _type)
         match_string = re.match(r'(ss::string)(<((?:(?>[^<>]+)|(?2))*)>)', _type)
         match_int = re.match(r'([u]{0,1}int(8|16|32|64)_t)', _type)
         match_vector = re.match(r'(ss::vector)(<((?:(?>[^<>]+)|(?2))*)>)', _type)
         match_bytebuffer = re.match(r'(ss::bytebuffer)(<((?:(?>[^<>]+)|(?2))*)>)', _type)
         is_variant = match_variant is not None
+        is_optional = match_optional is not None
         is_int = match_int is not None
         is_string = match_string is not None
         is_vector = False
@@ -186,9 +208,46 @@ class db_struct(object):
         is_vector_of_strings = False
         variant_types = None
         namespace = ""
-        if match_variant is not None:
-            variant_types = match_variant.groups()[2].split(',')
+        if match_optional is not None:
+            scalar_type = match_optional.groups()[2]
+            match_namespace = re.match(r'([^:]+::).+', scalar_type)
+            namespace = match_namespace.group(1) if match_namespace else ""
+            scalar_type = normalize_type(scalar_type)
+            if namespace=="ss::":
+                namespace = ""
+            elif namespace!="":
+                scalar_type = scalar_type.split(namespace)[-1]
+            is_vector=False
+            namespace = ""
+        elif match_variant is not None:
+            variant_type_names = match_variant.groups()[2].split(',')
+            variant_types =[]
+            for t in variant_type_names:
+                match_vector = re.match(r'(ss::vector[_]*)(<((?:(?>[^<>]+)|(?2))*)>)', t)
+                if match_vector is not None:
+                    is_vector=True
+                    scalar_type = normalize_type(match_vector.groups()[2].split(',')[0])
+                    match_namespace = re.match(r'([^:]+::).+', scalar_type)
+                    namespace = match_namespace.group(1) if match_namespace else ""
+                    if namespace=="ss::":
+                        namespace = ""
+                    elif namespace!="":
+                        scalar_type = scalar_type.split(namespace)[-1]
+                    assert type(scalar_type)!=list
+                else:
+                    is_vector=False
+                    match_namespace = re.match(r'([^:]+::).+', t)
+                    namespace = match_namespace.group(1) if match_namespace else ""
+                    scalar_type = normalize_type(t)
+                    if namespace=="ss::":
+                        namespace = ""
+                    elif namespace!="":
+                        scalar_type = scalar_type.split(namespace)[-1]
+                    assert type(scalar_type)!=list
+                variant_types.append(dict(variant_type=t, scalar_type=scalar_type, namespace=namespace))
             scalar_type = 'variant'
+            is_vector=False
+            namespace = ""
         elif match_vector is not None:
             scalar_type = normalize_type(match_vector.groups()[2].split(',')[0])
             assert type(scalar_type)!=list
@@ -206,12 +265,15 @@ class db_struct(object):
                 scalar_type = scalar_type.split(namespace)[-1]
             assert type(scalar_type)!=list
 
-        has_variable_size = _type.startswith('ss::')
+        has_variable_size = _type.startswith('ss::') or _type.startswith('std::variant') \
+            or _type.startswith('std::optional')
         self.fields.append(dict(field_id=field_id, type=_type, name=_name, default=_default,
                                 namespace = namespace,
                                 is_vector=is_vector, is_vector_of_strings=is_vector_of_strings,
                                 is_string=is_string, is_int = is_int,
-                                is_variant = is_variant, variant_types=variant_types,
+                                is_optional = is_optional,
+                                is_variant = is_variant,
+                                variant_types=variant_types,
                                 is_bytebuffer = is_bytebuffer,
                            #primary_key = self.primary_key,
                                 scalar_type=scalar_type, has_variable_size=has_variable_size))
@@ -628,7 +690,7 @@ class db_db(object):
         struct.alfas ='test'
         for field in struct.fields:
             #if field['is_vector'] or
-            if field['is_bytebuffer'] or field['is_variant']:
+            if field['is_bytebuffer'] or field['is_variant'] or field['is_optional']:
                 continue
             field_type = f"{field['namespace']}{field['scalar_type']}"
             fielddb, fieldstruct = self.db_and_struct_for_field(field)

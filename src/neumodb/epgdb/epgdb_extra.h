@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -21,7 +21,7 @@
 #pragma once
 #include "neumodb/epgdb/epgdb_db.h"
 #include "neumodb/chdb/chdb_extra.h"
-
+#include "fmt/core.h"
 
 namespace epgdb {
 	typedef screen_t<epgdb::epg_record_t> epg_screen_base_t;
@@ -36,26 +36,6 @@ namespace epgdb {
 		using epg_screen_base_t::epg_screen_base_t; //inherit constructors
 
 	};
-
-	template<typename T>
-	inline auto to_str(T&& t)
-	{
-		ss::string<64> s;
-		to_str(s, (const T&) t);
-		return s;
-	}
-
-	std::ostream& operator<<(std::ostream& os, const epg_source_t& s);
-	std::ostream& operator<<(std::ostream& os, const epg_service_t& s);
-	std::ostream& operator<<(std::ostream& os, const epg_key_t& k);
-	std::ostream& operator<<(std::ostream& os, const epg_record_t& epg);
-
-	void to_str(ss::string_& ret, const epg_source_t& s);
-	void to_str(ss::string_& ret, const epg_service_t& s);
-	void to_str(ss::string_& ret, const epg_key_t& k);
-	void to_str(ss::string_& ret, const epg_record_t& r);
-
-	void to_str_brief(ss::string_& ret, const epg_record_t& epg);
 
 	inline bool is_same(const epg_record_t &a, const epg_record_t &b) {
 		if (!(a.k == b.k))
@@ -81,26 +61,6 @@ namespace epgdb {
 		return true;
 
 	}
-#if 0
-	inline epg_service_t epg_service_from_service(const chdb::service_key_t& service_key) {
-		epg_service_t ret;
-		ret.sat_pos = service_key.mux.sat_pos;
-		ret.network_id = service_key.network_id;
-		ret.ts_id = service_key.ts_id;
-		ret.service_id = service_key.service_id;
-		return ret;
-	}
-#endif
-#if 0
-	inline chdb::service_key_t service_key_from_epg_service(const epgdb::epg_service_t& epgs) {
-		chdb::service_key_t ret;
-		ret.mux.sat_pos = epgs.sat_pos;
-		ret.network_id = epgs.network_id;
-		ret.ts_id = epgs.ts_id;
-		ret.service_id = epgs.service_id;
-		return ret;
-	}
-#endif
 
 		//TODO: see //emphasis off: see en_300468v010701p.pdf p. 78 data cleaning
 
@@ -117,12 +77,18 @@ namespace epgdb {
 		return running_now(txnepg, k, now);
 	}
 	std::unique_ptr<epg_screen_t>
-	chepg_screen(db_txn& txnepg, const chdb::service_key_t& service_key, time_t start_time,
+	chepg_screen(db_txn& txnepg,
+							 std::shared_ptr<neumodb_t> tmpdb, uint32_t sort_order,
+							 const chdb::service_key_t& service_key,
+							 time_t start_time,
 #ifdef USE_END_TIME
 							 time_t end_time =0,
 #endif
-							 uint32_t sort_order=0,
-							 std::shared_ptr<neumodb_t> tmpdb={});
+							 const ss::vector_<field_matcher_t>* field_matchers_ =nullptr,
+							 const epgdb::epg_record_t* match_data_ = nullptr,
+							 const ss::vector_<field_matcher_t>* field_matchers2_ =nullptr,
+							 const epgdb::epg_record_t* match_data2_ = nullptr
+		);
 
 	void clean(db_txn& txnepg, system_time_t start_time);
 
@@ -133,7 +99,7 @@ namespace epgdb {
 																																						 such in the input variable record*/);
 	bool save_epg_record_if_better(db_txn& txnepg, const epgdb::epg_record_t& record);
 
-
+	bool update_epg_recording_status(db_txn& epgdb_wtxn, const epgdb::epg_record_t& epgrec);
 
 	class gridepg_screen_t {
 		struct entry_t {
@@ -189,3 +155,18 @@ namespace epgdb {
 	};
 
 };
+
+#define declfmt(t)																											\
+	template <> struct fmt::formatter<t> {																\
+	inline constexpr format_parse_context::iterator parse(format_parse_context& ctx) { \
+		return ctx.begin();																									\
+	}																																			\
+																																				\
+	format_context::iterator format(const t&, format_context& ctx) const ;\
+}
+
+
+declfmt(epgdb::epg_source_t);
+declfmt(epgdb::epg_key_t);
+declfmt(epgdb::epg_record_t);
+#undef declfmt

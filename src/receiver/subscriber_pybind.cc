@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -74,15 +74,23 @@ static py::object constellation_helper(const ss::vector_<dtv_fe_constellation_sa
 
 static void set_gtk_window_name(py::object window, const char* name) {
 	auto* w = wxLoad<wxWindow>(window, "wxWindow");
-	auto* x = w->GetHandle();
-	gtk_widget_set_name(x, (const gchar*)name);
+	if(!w) {
+		dterrorf("Could not set window name {}", name);
+	} else {
+		auto* x = w->GetHandle();
+		if(!x) {
+			dterrorf("Could not get handle for window {}", name);
+		} else {
+			gtk_widget_set_name(x, (const gchar*)name);
+		}
+	}
 }
 
 static void gtk_add_window_style(py::object window, const char* style) {
 	auto* w = wxLoad<wxWindow>(window, "wxWindow");
 	auto* x = w->GetHandle();
 	if (!x) {
-		dterror("Invalid window");
+		dterrorf("Invalid window");
 		return;
 	}
 	GtkStyleContext* ctx = gtk_widget_get_style_context(x);
@@ -92,12 +100,12 @@ static void gtk_add_window_style(py::object window, const char* style) {
 static void gtk_remove_window_style(py::object window, const char* style) {
 	auto* w = wxLoad<wxWindow>(window, "wxWindow");
 	if (!w) {
-		dterror("Invalid window");
+		dterrorf("Invalid window");
 		return;
 	}
 	auto* x = w->GetHandle();
 	if (!x) {
-		dterror("Invalid window");
+		dterrorf("Invalid window");
 		return;
 	}
 	GtkStyleContext* ctx = gtk_widget_get_style_context(x);
@@ -120,15 +128,6 @@ static py::object get_object(long x) {
 	return subscriber_t::handle_to_py_object(x);
 }
 
-void export_retune_mode(py::module& m) {
-	py::enum_<retune_mode_t>(m, "retune_mode_t", py::arithmetic())
-		.value("AUTO", retune_mode_t::AUTO)
-		.value("NEVER", retune_mode_t::NEVER)
-		.value("IF_NOT_LOCKED", retune_mode_t::IF_NOT_LOCKED)
-		.value("UNCHANGED", retune_mode_t::UNCHANGED)
-		;
-}
-
 void export_pls_search_range(py::module& m) {
 	py::class_<pls_search_range_t>(m, "pls_search_range_t")
 		.def(py::init())
@@ -139,9 +138,10 @@ void export_pls_search_range(py::module& m) {
 		;
 }
 
-
-static int scan_spectral_peaks(subscriber_t& subscriber, const statdb::spectrum_key_t& spectrum_key,
-																			py::array_t<float> peak_freq, py::array_t<float> peak_sr) {
+static int scan_spectral_peaks(subscriber_t& subscriber,
+															 const devdb::rf_path_t& rf_path,
+															 const statdb::spectrum_key_t& spectrum_key,
+															 py::array_t<float> peak_freq, py::array_t<float> peak_sr) {
 	py::buffer_info infofreq = peak_freq.request();
 	if (infofreq.ndim != 1)
 		throw std::runtime_error("Bad number of dimensions");
@@ -160,39 +160,91 @@ static int scan_spectral_peaks(subscriber_t& subscriber, const statdb::spectrum_
 		peaks.push_back(chdb::spectral_peak_t{(uint32_t) (pfreq[i]*1000), (uint32_t) psr[i],
 				spectrum_key.pol});
 	}
-	auto subscription_id = subscriber.scan_spectral_peaks(peaks, spectrum_key);
+	auto subscription_id = subscriber.scan_spectral_peaks(rf_path, peaks, spectrum_key);
 	return subscription_id;
 }
 
-static int scan_muxes(subscriber_t& subscriber, py::list mux_list) {
+static int scan_bands_on_sats(subscriber_t& subscriber, ss::vector_<chdb::sat_t>& sats,
+															const devdb::tune_options_t& tune_options,
+															const devdb::band_scan_options_t& band_scan_options) {
+	using namespace chdb;
+
+	for(int i=0; i < sats.size();++i) {
+		auto& sat =  sats[i];
+		auto [l, h] = sat_band_freq_bounds(sat.sat_band, sat_sub_band_t::NONE);
+		l = band_scan_options.start_freq == -1 ? l : std::max(l, band_scan_options.start_freq);
+		h = band_scan_options.end_freq == -1 ? h : std::max(h, band_scan_options.end_freq);
+		if(h<=l) {
+			sats.erase(i); //no overlap
+			--i;
+			continue;
+		}
+	}
+	auto subscription_id = subscriber.scan_bands(sats, tune_options, band_scan_options);
+	return subscription_id;
+}
+
+
+template<typename mux_t>
+static int scan_muxes(subscriber_t& subscriber, const ss::vector_<mux_t>& muxes,
+											const std::optional<devdb::tune_options_t>& tune_options) {
+	return subscriber.scan_muxes(muxes, tune_options);
+}
+
+static int scan_muxes_on_sats(subscriber_t& subscriber, db_txn& chdb_rtxn,
+															ss::vector_<chdb::sat_t>& sats,
+															const devdb::tune_options_t& tune_options,
+															const devdb::band_scan_options_t& band_scan_options) {
+
+	using namespace chdb;
+	using namespace devdb;
+	assert(tune_options.subscription_type == subscription_type_t::MUX_SCAN);
+
 	ss::vector<chdb::dvbs_mux_t,1> dvbs_muxes;
 	ss::vector<chdb::dvbc_mux_t,1> dvbc_muxes;
 	ss::vector<chdb::dvbt_mux_t,1> dvbt_muxes;
-	for(auto m: mux_list) {
-		bool ok{false};
-		if(!ok)
-			try {
-				auto* dvbs_mux = m.cast<chdb::dvbs_mux_t*>();
-				dvbs_muxes.push_back(*dvbs_mux);
-				ok=true;
-			} catch (py::cast_error& e) {}
-		if(!ok)
-			try {
-				auto* dvbc_mux = m.cast<chdb::dvbc_mux_t*>();
-				dvbc_muxes.push_back(*dvbc_mux);
-				ok=true;
-			} catch (py::cast_error& e) {}
-		if(!ok)
-			try {
-				auto* dvbt_mux = m.cast<chdb::dvbt_mux_t*>();
-				dvbt_muxes.push_back(*dvbt_mux);
-				ok=true;
-			} catch (py::cast_error& e) {}
+
+	for(auto sat: sats) {
+		auto [l, h] =sat_band_freq_bounds(sat.sat_band, sat_sub_band_t::NONE);
+
+		auto addmux = [&]<typename mux_t>(db_txn& chdb_rtxn, int sat_pos, ss::vector<mux_t,1>& mux_list, int l,
+																			int h) {
+			auto c = mux_t::find_by_key(chdb_rtxn, sat_pos, find_type_t::find_geq, mux_t::partial_keys_t::sat_pos);
+			for(const auto& m : c.range()) {
+				if((int)m.frequency >= l && (int)m.frequency <=h)
+					mux_list.push_back(m);
+			}
+		};
+
+		if(sat.sat_pos == sat_pos_dvbt)
+			addmux(chdb_rtxn, sat.sat_pos, dvbt_muxes, l, h);
+		else if (sat.sat_pos == sat_pos_dvbc)
+			addmux(chdb_rtxn, sat.sat_pos, dvbc_muxes, l, h);
+		else
+			addmux(chdb_rtxn, sat.sat_pos, dvbs_muxes, l, h);
 	}
-	auto ret = subscriber.scan_muxes(dvbs_muxes, dvbc_muxes, dvbt_muxes);
+
+	auto ret = 0;
+	if(dvbs_muxes.size() > 0) {
+		auto ret_ = subscriber.scan_muxes(dvbs_muxes, tune_options);
+		if(ret_ < 0)
+			ret = ret_;
+		assert(ret_<0 || ret==ret_);
+	}
+	if(dvbc_muxes.size() > 0) {
+		auto ret_ = subscriber.scan_muxes(dvbc_muxes, tune_options);
+		if(ret_ < 0)
+			ret = ret_;
+		assert(ret_<0 || ret==ret_);
+	}
+	if(dvbt_muxes.size() > 0) {
+		auto ret_ = subscriber.scan_muxes(dvbt_muxes, tune_options);
+		if(ret_ < 0)
+			ret = ret_;
+		assert(ret_<0 || ret==ret_);
+	}
 	return ret;
 }
-
 
 
 void export_subscriber(py::module& m) {
@@ -200,7 +252,6 @@ void export_subscriber(py::module& m) {
 	if (called)
 		return;
 	called = true;
-	export_retune_mode(m);
 	export_pls_search_range(m);
 	m.def("get_object", &get_object)
 		.def("set_gtk_window_name", &set_gtk_window_name
@@ -235,7 +286,7 @@ void export_subscriber(py::module& m) {
 				 , py::arg("retune_mode"))
 		.def("subscribe_lnb_and_mux"
 				 , &subscriber_t::subscribe_lnb_and_mux
-				 , "Subscribe to a specific mux usign a specific lnb"
+				 , "Subscribe to a specific mux using a specific lnb"
 				 , py::arg("rf_path")
 				 , py::arg("lnb")
 				 , py::arg("mux")
@@ -244,26 +295,48 @@ void export_subscriber(py::module& m) {
 				 , py::arg("retune_mode"))
 		.def("scan_spectral_peaks", &scan_spectral_peaks,
 				 "scan peaks in the spectrum all at once",
+				 py::arg("rf_path"),
 				 py::arg("spectrum_key"), py::arg("peak_freq"), py::arg("peak_sr")
 			)
-		.def("scan_muxes", &scan_muxes,
-				 "scan muxes",
-				 py::arg("muxes")
+		.def("scan_muxes", &scan_muxes<chdb::dvbs_mux_t>, "scan muxes"
+				 , py::arg("muxes")
+				 , py::arg("tune_options")=nullptr
+			)
+		.def("scan_muxes", &scan_muxes<chdb::dvbc_mux_t>, "scan muxes"
+				 , py::arg("muxes")
+				 , py::arg("tune_options")=nullptr
+			)
+		.def("scan_muxes", &scan_muxes<chdb::dvbt_mux_t>, "scan muxes"
+				 , py::arg("muxes")
+				 , py::arg("tune_options")=nullptr
+			)
+		.def("scan_muxes_on_sats", &scan_muxes_on_sats
+				 , "scan all muxes on selected sats"
+				 , py::arg("chdb_rtxn")
+				 , py::arg("sats")
+				 , py::arg("tune_options")
+				 , py::arg("band_scan_options")
+			)
+		.def("scan_bands_on_sats", &scan_bands_on_sats
+				 , "acquire spectra and then scan peaks for selected sats"
+				 , py::arg("sats")
+				 , py::arg("tune_options")
+				 , py::arg("band_scan_options")
 			)
 		.def_property_readonly("error_message", [](subscriber_t* self) {
 			return get_error().c_str(); })
 		.def("unsubscribe"
 				 , &subscriber_t::unsubscribe
 				 , "End tuning")
-		.def("subscribe_spectrum"
-				 , &subscriber_t::subscribe_spectrum
+		.def("subscribe_spectrum_acquisition"
+				 , &subscriber_t::subscribe_spectrum_acquisition
 				 , "acquire a spectrum for this lnb"
 				 , py::arg("rf_path")
 				 , py::arg("lnb")
 				 , py::arg("pol to scan")
 				 , py::arg("start_freq")
 				 , py::arg("end_freq")
-				 , py::arg("sat_pos") = sat_pos_none
+				 , py::arg("sat")
 			)
 		.def("positioner_cmd"
 				 , &subscriber_t::positioner_cmd
@@ -305,7 +378,8 @@ void export_signal_info(py::module& m) {
 		})
 		.def_property_readonly("sat_pos_confirmed", [](const signal_info_t& i) {
 			return i.tune_confirmation.sat_by != confirmed_by_t::NONE
-				&& mux_common_ptr(i.driver_mux)->tune_src ==  tune_src_t::NIT_TUNED;
+				&& (mux_common_ptr(i.driver_mux)->tune_src ==  tune_src_t::NIT_TUNED
+						|| mux_common_ptr(i.driver_mux)->tune_src ==  tune_src_t::NIT_CORRECTED);
 		})
 		.def_property_readonly("on_wrong_sat", [](const signal_info_t& i) {
 			return i.tune_confirmation.on_wrong_sat;
@@ -425,31 +499,36 @@ void export_sdt_data(py::module& m) {
 		;
 }
 
+void export_position_motion_report(py::module& m) {
+	static bool called = false;
+	if (called)
+		return;
+	called = true;
+	using namespace chdb;
+	py::class_<positioner_motion_report_t>(m, "positioner_motion_report_t",
+																				 "Tune Options for neumodvb")
+		.def_readwrite("dish", &positioner_motion_report_t::dish)
+		.def_readwrite("start_time", &positioner_motion_report_t::start_time)
+		.def_readwrite("end_time", &positioner_motion_report_t::end_time)
+		;
+}
+
 void export_scan_report(py::module& m) {
 	static bool called = false;
 	if (called)
 		return;
 	called = true;
 	using namespace chdb;
-	py::class_<scan_stats_t>(m, "scan_stats_t")
+	py::class_<scan_mux_end_report_t>(m, "scan_mux_end_report_t")
 		.def(py::init())
-		.def_readwrite("pending_peaks", &scan_stats_t::pending_peaks)
-		.def_readwrite("pending_muxes", &scan_stats_t::pending_muxes)
-		.def_readwrite("active_muxes", &scan_stats_t::active_muxes)
-		.def_readwrite("finished_muxes", &scan_stats_t::finished_muxes)
-		.def_readwrite("failed_muxes", &scan_stats_t::failed_muxes)
-		.def_readwrite("locked_muxes", &scan_stats_t::locked_muxes)
-		.def_readwrite("si_muxes", &scan_stats_t::si_muxes)
+		.def_readwrite("spectrum_key", &scan_mux_end_report_t::spectrum_key)
+		.def_readwrite("peak", &scan_mux_end_report_t::peak)
+		.def_readwrite("mux", &scan_mux_end_report_t::mux)
+		.def_readwrite("fe_key", &scan_mux_end_report_t::fe_key)
 		;
-	py::class_<scan_report_t>(m, "scan_report_t")
+	py::class_<peak_to_scan_t>(m, "peak_to_scan_t")
 		.def(py::init())
-		.def_readwrite("spectrum_key", &scan_report_t::spectrum_key)
-		.def_readwrite("peak", &scan_report_t::peak)
-		.def_readwrite("mux", &scan_report_t::mux)
-		.def_readwrite("fe_key", &scan_report_t::fe_key)
-		//.def_readwrite("lnb_key", &scan_report_t::lnb_key)
-		//.def_readwrite("sat_pos", &scan_report_t::sat_pos)
-		.def_readwrite("band", &scan_report_t::band)
-		.def_readwrite("scan_stats", &scan_report_t::scan_stats)
+		.def_readwrite("peak", &peak_to_scan_t::peak)
+		.def_readwrite("scan_id", &peak_to_scan_t::scan_id)
 		;
 }

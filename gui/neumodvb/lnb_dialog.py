@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -53,9 +53,21 @@ class LnbNetworkDialog(LnbNetworkDialog_):
         self.lnbnetworkgrid.OnNew(event)
         event.Skip()
 
+    def CmdNew(self, event):
+        dtdebug("CmdNew")
+        f = wx.GetApp().frame
+        if not f.parent.edit_mode:
+            f.SetEditMode(True)
+        self.OnNew(event)
+
     def OnDelete(self, event):
         self.lnbnetworkgrid.OnDelete(event)
         event.Skip()
+
+    def CmdDelete(self, event):
+        dtdebug("CmdDelete")
+        self.OnDelete(event)
+        return False
 
     def OnDone(self, event):
         self.lnbnetworkgrid.OnDone(event)
@@ -100,9 +112,21 @@ class LnbConnectionDialog(LnbConnectionDialog_):
         self.lnbconnectiongrid.OnNew(event)
         event.Skip()
 
+    def CmdNew(self, event):
+        dtdebug("CmdNew")
+        f = wx.GetApp().frame
+        if not f.parent.edit_mode:
+            f.SetEditMode(True)
+        self.OnNew(event)
+
     def OnDelete(self, event):
         self.lnbconnectiongrid.OnDelete(event)
         event.Skip()
+
+    def CmdDelete(self, event):
+        dtdebug("CmdDelete")
+        self.OnDelete(event)
+        return False
 
     def OnDone(self, event):
         self.lnbconnectiongrid.OnDone(event)

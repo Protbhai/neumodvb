@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -23,7 +23,7 @@
 #include "util/dtassert.h"
 #include "util/logger.h"
 #include "util/neumovariant.h"
-#include "tune_options.h"
+#include "neumodb/devdb/tune_options.h"
 #include <dirent.h>
 #include <errno.h>
 #include <functional>
@@ -86,7 +86,7 @@ static std::tuple<api_type_t, int>  get_dvb_api_type() {
 
 		try {
 			std::string version = cfg.lookup("version");
-			dtdebugx("Neumo dvbapi detected; version=%s", version.c_str());
+			dtdebugf("Neumo dvbapi detected; version={}", version);
 			cached = { api_type_t::NEUMO, 1000*std::stof(version)};
 			return cached;
 
@@ -181,16 +181,6 @@ public:
 		return r->resource_reuse_bonus;
 	}
 
-
-	template <typename mux_t>
-	std::shared_ptr<dvb_frontend_t> find_fe_for_tuning_to_mux(db_txn& txn, const mux_t& mux,
-																														const dvb_frontend_t* fe_to_release,
-																														const tune_options_t& tune_options) const;
-
-	std::tuple<std::shared_ptr<dvb_frontend_t>, devdb::rf_path_t, devdb::lnb_t, devdb::resource_subscription_counts_t>
-	find_fe_and_lnb_for_tuning_to_mux(db_txn& txn, const chdb::dvbs_mux_t& mux, const devdb::rf_path_t* required_rf_path,
-																		const dvb_frontend_t* fe_to_release,
-																		const tune_options_t& tune_options) const;
 	void update_dbfe(const adapter_no_t adapter_no, const frontend_no_t frontend_no,
 									 fe_state_t& t);
 
@@ -199,7 +189,7 @@ public:
 
 
 dvbdev_monitor_t::~dvbdev_monitor_t() {
-	dtdebug("dvbdev_monitor_t destructor\n");
+	dtdebugf("dvbdev_monitor_t destructor\n");
 	if (wd_dev) {
 		inotify_rm_watch(inotfd, wd_dev);
 		wd_dev = -1;
@@ -272,9 +262,9 @@ void dvbdev_monitor_t::update_dbfe(const adapter_no_t adapter_no, const frontend
 		t.dbfe.card_no = dbfe_old.card_no;
 	bool changed = !c.is_valid() || (dbfe_old != t.dbfe);
 	if(dbfe_old.sub.owner != -1 && dbfe_old.sub.owner != getpid() && kill((pid_t)dbfe_old.sub.owner, 0)) {
-		dtdebugx("process pid=%d has died\n", dbfe_old.sub.owner);
+		dtdebugf("process pid={:d} has died\n", dbfe_old.sub.owner);
 		t.dbfe.sub.owner = -1;
-		t.dbfe.sub.use_count = 0;
+		t.dbfe.sub.subs.clear();
 		changed = true;
 	}
 
@@ -293,21 +283,21 @@ void dvbdev_monitor_t::update_dbfe(const adapter_no_t adapter_no, const frontend
 
 void dvbdev_monitor_t::on_new_frontend(adapter_no_t adapter_no, frontend_no_t frontend_no) {
 	if (frontend_exists(adapter_no, frontend_no)) {
-		dtdebugx("Frontend already exists!\n");
+		dtdebugf("Frontend already exists!\n");
 		return;
 	}
-	char fname[256];
-	sprintf(fname, "/dev/dvb/adapter%d/frontend%d", (int)adapter_no, (int)frontend_no);
+	ss::string<128> fname;
+	fname.format("/dev/dvb/adapter{:d}/frontend{:d}", (int)adapter_no, (int)frontend_no);
 	int wd = -1;
 	int count = 0;
-	while (((wd = inotify_add_watch(inotfd, fname, IN_OPEN | IN_CLOSE | IN_DELETE_SELF)) < 0) && (count < 100)) {
+	while (((wd = inotify_add_watch(inotfd, fname.c_str(), IN_OPEN | IN_CLOSE | IN_DELETE_SELF)) < 0) && (count < 100)) {
 		usleep(20000);
 		count++;
 	}
 	if (count > 0)
-		dtdebugx("Count=%d\n", count);
+		dtdebugf("Count={:d}\n", count);
 	if (wd < 0) {
-		dtdebugx("ERROR: %s\n", strerror(errno));
+		dtdebugf("ERROR: {}", strerror(errno));
 		assert(0);
 	}
 	auto fe = dvb_frontend_t::make(this, adapter_no, frontend_no, api_type, api_version);
@@ -317,18 +307,21 @@ void dvbdev_monitor_t::on_new_frontend(adapter_no_t adapter_no, frontend_no_t fr
 		w->dbfe.can_be_used = true;
 		update_dbfe(fe->adapter_no, fe->frontend_no, *w);
 	}
-	frontends.try_emplace({adapter_no, frontend_no}, fe);
+	{auto w = frontends.writeAccess();
+		w->try_emplace({adapter_no, frontend_no}, fe);
+	}
 
 	// adapter->update_adapter_can_be_used();
 	frontend_map.emplace(wd, fe);
-	dtdebugx("new frontend adapter %d fe=%d wd=%d p=%p\n", (int)fe->adapter_no, (int)fe->frontend_no, wd, fe.get());
+	dtdebugf("new frontend adapter {:d} fe={:d} wd={:d} p={:p}",
+					 (int)fe->adapter_no, (int)fe->frontend_no, wd, fmt::ptr(fe.get()));
 }
 
 void dvbdev_monitor_t::on_delete_frontend(struct inotify_event* event) {
 // should be a frontend or demux is removed
 	auto it = frontend_map.find(event->wd);
 	if (it == frontend_map.end()) {
-		dtdebugx("Could not find frontend wd=%d\n", event->wd);
+		dtdebugf("Could not find frontend wd={:d}\n", event->wd);
 		// assert(0);
 		return;
 	}
@@ -338,8 +331,7 @@ void dvbdev_monitor_t::on_delete_frontend(struct inotify_event* event) {
 	//@todo: stop all active muxes and active services
 	fe->stop_frontend_monitor_and_wait();
 	frontend_map.erase(it);
-	dtdebugx("delete frontend adapter %d fe=%d wd=%d count=%ld\n", (int)fe->adapter_no, (int)fe->frontend_no, event->wd,
-					 frontends.size());
+	dtdebugf("delete frontend adapter {:d} fe={:d} wd={:d}\n", (int)fe->adapter_no, (int)fe->frontend_no, event->wd);
 	{
 		auto w = fe->ts.writeAccess();
 		w->dbfe.can_be_used = false;
@@ -347,37 +339,38 @@ void dvbdev_monitor_t::on_delete_frontend(struct inotify_event* event) {
 		w->dbfe.can_be_used = false;
 		update_dbfe(fe->adapter_no, fe->frontend_no, *w);
 	}
-	frontends.erase({fe->adapter_no, fe->frontend_no});
-	// adapter->update_adapter_can_be_used();
+	{ auto w = frontends.writeAccess();
+	w->erase({fe->adapter_no, fe->frontend_no});
+	}
 }
 
 void dvbdev_monitor_t::discover_frontends(adapter_no_t adapter_no) {
-	char fname[256];
-	sprintf(fname, "/dev/dvb/adapter%d", (int) adapter_no);
+	ss::string<256> fname;
+	fname.format("/dev/dvb/adapter{:d}", (int) adapter_no);
 	auto frontend_cb = [this, adapter_no](int frontend_no) {
 		on_new_frontend(adapter_no, frontend_no_t(frontend_no)); };
 
 	// scan /dev/dvb/adapterX for all frontends
-	discover_helper(fname, "frontend%d", 32, frontend_cb);
+	discover_helper(fname.c_str(), "frontend%d", 32, frontend_cb);
 }
 
 void dvbdev_monitor_t::on_new_adapter(int adapter_no) {
-	char fname[256];
+	ss::string<256> fname;
 	if(adapter_no_exists(adapter_no_t(adapter_no))) {
-		dtdebugx("Adapter %d already exists\n", adapter_no);
+		dtdebugf("Adapter {:d} already exists\n", adapter_no);
 		return;
 	}
-	sprintf(fname, "/dev/dvb/adapter%d", adapter_no);
-	auto wd = inotify_add_watch(inotfd, fname, IN_CREATE | IN_DELETE_SELF);
+	fname.format("/dev/dvb/adapter{:d}", adapter_no);
+	auto wd = inotify_add_watch(inotfd, fname.c_str(), IN_CREATE | IN_DELETE_SELF);
 	adapter_no_map.emplace(wd, adapter_no_t{adapter_no});
-	dtdebugx("new adapter %d wd=%d\n", adapter_no, wd);
+	dtdebugf("new adapter {:d} wd={:d}\n", adapter_no, wd);
 	discover_frontends(adapter_no_t(adapter_no));
 }
 
 void dvbdev_monitor_t::on_delete_adapter(struct inotify_event* event) {
 	auto it = adapter_no_map.find(event->wd);
 	if (it == adapter_no_map.end()) {
-		dtdebugx("Could not find adapter\n");
+		dtdebugf("Could not find adapter\n");
 		assert(0);
 	}
 	auto [wd, adapter_no] = *it;
@@ -399,17 +392,17 @@ void dvbdev_monitor_t::discover_adapters() {
 void dvbdev_monitor_t::on_new_dir(struct inotify_event* event) {
 	if (event->wd == wd_dev) { // new subdir of /dev/
 		if (strcmp(event->name, "dvb") == 0) {
-			dtdebugx("first adapter....\n");
+			dtdebugf("first adapter....\n");
 			if (wd_dev_dvb >= 0) {
 				inotify_rm_watch(inotfd, wd_dev_dvb);
-				dtdebugx("unexpected: stil watching /dev/dvb\n");
+				dtdebugf("unexpected: stil watching /dev/dvb\n");
 				wd_dev_dvb = -1;
 			}
 			wd_dev_dvb = inotify_add_watch(inotfd, "/dev/dvb", IN_CREATE | IN_DELETE_SELF);
 			if (wd_dev_dvb < 0) {
-				dtdebugx("ERROR: %s\n", strerror(errno));
+				dtdebugf("ERROR: {}", strerror(errno));
 			}
-			dtdebugx("Removing watch to /dev because /dev/dvb now exist\n");
+			dtdebugf("Removing watch to /dev because /dev/dvb now exist\n");
 			inotify_rm_watch(inotfd, wd_dev);
 			wd_dev = -1;
 			discover_adapters(); // needed because some adapters may already exist
@@ -420,7 +413,7 @@ void dvbdev_monitor_t::on_new_dir(struct inotify_event* event) {
 			on_new_adapter(adapter_no);
 		}
 	} else
-		dtdebugx("should not happen\n");
+		dtdebugf("should not happen\n");
 }
 
 void dvbdev_monitor_t::on_new_file(struct inotify_event* event) {
@@ -429,7 +422,7 @@ void dvbdev_monitor_t::on_new_file(struct inotify_event* event) {
 	if (sscanf(event->name, "frontend%d", &frontend_no) == 1) {
 		auto it = adapter_no_map.find(event->wd);
 		if (it == adapter_no_map.end()) {
-			dtdebugx("Adapter not found");
+			dtdebugf("Adapter not found");
 			assert(0);
 		}
 		on_new_frontend(adapter_no_t(it->second), frontend_no_t(frontend_no));
@@ -440,8 +433,8 @@ void dvbdev_monitor_t::on_delete_dir(struct inotify_event* event) {
 	if (event->wd == wd_dev_dvb) { // subdir of /dev/
 		inotify_rm_watch(inotfd, wd_dev_dvb);
 		wd_dev_dvb = -1;
-		dtdebugx("delete /dev/dvb\n");
-		dtdebugx("Adding watch to /dev because /dev/dvb no longer exist\n");
+		dtdebugf("delete /dev/dvb\n");
+		dtdebugf("Adding watch to /dev because /dev/dvb no longer exist\n");
 		if (wd_dev < 0)
 			wd_dev = inotify_add_watch(inotfd, "/dev", IN_CREATE);
 
@@ -471,7 +464,7 @@ int dvbdev_monitor_t::start() {
 
 	/*checking for error*/
 	if (inotfd < 0) {
-		dtdebug("inotify_init");
+		dtdebugf("inotify_init");
 		throw std::runtime_error("Cannot start dvbdev_monitor");
 	}
 
@@ -479,7 +472,7 @@ int dvbdev_monitor_t::start() {
 		of the directory before adding into monitoring list.*/
 	wd_dev_dvb = inotify_add_watch(inotfd, "/dev/dvb/", IN_CREATE | IN_DELETE_SELF);
 	if (wd_dev_dvb < 0) {
-		dtdebugx("Adding watch to /dev because /dev/dvb does not exist\n");
+		dtdebugf("Adding watch to /dev because /dev/dvb does not exist\n");
 		wd_dev = inotify_add_watch(inotfd, "/dev", IN_CREATE);
 	}
 
@@ -496,10 +489,11 @@ int dvbdev_monitor_t::start() {
 
 int dvbdev_monitor_t::stop() {
 	// special type of for loop because monitors map will be erased and iterators are invalidated
-	for (auto& [key, fe]:  frontends) {
-		fe->stop_frontend_monitor_and_wait();
+	{ auto r = frontends.owner_read_ref();
+		for (auto& [key, fe]: r) {
+			fe->stop_frontend_monitor_and_wait();
+		}
 	}
-
 	{ //mark all live stat_info_t records as none live
 		auto wtxn = receiver.statdb.wtxn();
 		statdb::clean_live(wtxn);
@@ -514,12 +508,10 @@ int dvbdev_monitor_t::stop() {
 	if (inotfd >= 0)
 		if (::close(inotfd) != 0) {
 			if (errno != EINTR)
-				dterror("Error while close inotify");
+				dterrorf("Error while close inotify");
 		}
 	return 0;
 }
-
-
 
 void dvbdev_monitor_t::disable_missing_adapters() {
 	using namespace chdb;
@@ -528,7 +520,8 @@ void dvbdev_monitor_t::disable_missing_adapters() {
 	for (auto fe : c.range()) {
 		bool found{false};
 		//check if an frontend with the correct key is present
-		for (const auto& [k, present_fe]: frontends) {
+		auto r = frontends.owner_read_ref();
+		for (const auto& [k, present_fe]: r) {
 			auto ts = present_fe->ts.readAccess();
 			if(ts->dbfe.k ==  fe.k) {
 				found = true;
@@ -537,7 +530,7 @@ void dvbdev_monitor_t::disable_missing_adapters() {
 		}
 		if(!found) {
 			ss::string<128> adapter_name;
-			adapter_name.sprintf("A-- %s", fe.card_short_name);
+			adapter_name.format("A-- {:s}", fe.card_short_name);
 			if(fe.present || fe.can_be_used || adapter_name != fe.adapter_name ||
 				 fe.sub != devdb::fe_subscription_t()) {
 				fe.can_be_used = false;
@@ -597,8 +590,9 @@ bool dvbdev_monitor_t::renumber_cards() {
 			changed = true;
 			put_record(devdb_wtxn, dbfe);
 		}
-		auto it = frontends.find({(adapter_no_t)dbfe.adapter_no, (frontend_no_t)dbfe.k.frontend_no});
-		if(it != frontends.end())  {
+		auto [it, found] = find_in_safe_map_with_owner_read_ref(
+			frontends, std::tuple{(adapter_no_t)dbfe.adapter_no, (frontend_no_t)dbfe.k.frontend_no});
+		if(found)  {
 			auto& fe =*it->second;
 			auto w = fe.ts.writeAccess();
 			w->dbfe.card_no = dbfe.card_no;
@@ -656,8 +650,9 @@ void dvbdev_monitor_t::renumber_card(int old_number, int new_number) {
 			dbfe.card_no = new_number;
 			put_record(devdb_wtxn, dbfe);
 		}
-		auto it = frontends.find({(adapter_no_t)dbfe.adapter_no, (frontend_no_t)dbfe.k.frontend_no});
-		if(it != frontends.end())  {
+		auto [it, found] = find_in_safe_map_with_owner_read_ref(
+			frontends, std::tuple{(adapter_no_t)dbfe.adapter_no, (frontend_no_t)dbfe.k.frontend_no});
+		if(found)  {
 			auto& fe =*it->second;
 			auto w = fe.ts.writeAccess();
 			w->dbfe.card_no = dbfe.card_no;
@@ -689,7 +684,7 @@ int dvbdev_monitor_t::run() {
 			case EINTR:
 				continue;
 			default:
-				dterrorx("read error: %s", strerror(errno));
+				dterrorf("read error: {:s}", strerror(errno));
 				return -1;
 			}
 		}
@@ -720,9 +715,9 @@ int dvbdev_monitor_t::run() {
 				// TODO: update can_be_used for adapter and frontend
 			} else if (event->mask & IN_IGNORED) {
 			} else
-				dtdebugx("UNPROCESSED EVENT\n");
+				dtdebugf("UNPROCESSED EVENT\n");
 			i += EVENT_SIZE + event->len;
-			// dtdebugx("new read\n");
+			// dtdebugf("new read\n");
 		}
 		commit_txns();
 	}
@@ -808,50 +803,6 @@ bool fe_state_t::is_tuned_to(const chdb::any_mux_t& mux, const devdb::rf_path_t*
 	return ret;
 }
 
-template <typename mux_t>
-std::shared_ptr<dvb_frontend_t>
-dvbdev_monitor_t::find_fe_for_tuning_to_mux(db_txn& rtxn, const mux_t& mux,
-																						const dvb_frontend_t* fe_to_release,
-																						const tune_options_t& tune_options) const {
-	const devdb::fe_key_t* fe_key_to_release;
-	const auto need_blindscan = tune_options.use_blind_tune;
-	const bool need_spectrum = false;
-	const auto delsys_type = chdb::delsys_type_for_mux_type<mux_t>();
-	bool need_multistream = (mux.k.stream_id >= 0);
-	auto best_dbfe = devdb::fe::find_best_fe_for_dvtdbc(rtxn, fe_key_to_release, need_blindscan, need_spectrum,
-																											need_multistream,  delsys_type, false /*ignore_subscriptions*/);
-	assert(best_dbfe->can_be_used);
-	return find_fe(best_dbfe->k);
-}
-
-
-std::tuple<std::shared_ptr<dvb_frontend_t>, devdb::rf_path_t, devdb::lnb_t, devdb::resource_subscription_counts_t>
-dvbdev_monitor_t::find_fe_and_lnb_for_tuning_to_mux(db_txn& rtxn, const chdb::dvbs_mux_t& mux,
-																										const devdb::rf_path_t* required_rf_path,
-																										const dvb_frontend_t* fe_to_release,
-																										const tune_options_t& tune_options) const {
-	using namespace chdb;
-	using namespace devdb;
-	auto dish_move_penalty = get_dish_move_penalty();
-	auto resource_reuse_bonus = get_resource_reuse_bonus();
-	auto fe_key = fe_to_release ? fe_to_release->fe_key() : devdb::fe_key_t{};
-	auto* fe_key_to_release = fe_to_release? &fe_key : nullptr;
-
-	auto[best_fe, best_rf_path, best_lnb, best_use_counts] =
-		fe::find_fe_and_lnb_for_tuning_to_mux(rtxn, mux, required_rf_path,
-																					fe_key_to_release,
-																					tune_options.may_move_dish, tune_options.use_blind_tune,
-																					dish_move_penalty, resource_reuse_bonus, false /*ignore_subscriptions*/);
-	//temporary hack to return the proper live data structures
-	auto fe = find_fe(best_fe->k);
-	if (!fe) {
-		dtdebug("LNB " << *best_lnb << " not connected to any fe");
-		return {nullptr, *best_rf_path, *best_lnb, best_use_counts};
-	}
-	assert(best_fe->can_be_used);
-	return {fe, *best_rf_path, *best_lnb, best_use_counts};
-}
-
 std::tuple<std::string, int> adaptermgr_t::get_api_type() const {
 	const char* api_type="";
 	switch(this->api_type) {
@@ -863,34 +814,4 @@ std::tuple<std::string, int> adaptermgr_t::get_api_type() const {
 		break;
 	}
 	return { api_type, this->api_version};
-}
-
-
-
-template <typename mux_t>
-std::shared_ptr<dvb_frontend_t> adaptermgr_t::find_fe_for_tuning_to_mux(
-	db_txn& txn, const mux_t& mux,
-	const dvb_frontend_t* fe_to_release,
-	const tune_options_t& tune_options) const {
-	return (static_cast<const dvbdev_monitor_t*>(this))
-		->find_fe_for_tuning_to_mux(txn, mux, fe_to_release, tune_options);
-}
-
-template std::shared_ptr<dvb_frontend_t>
-adaptermgr_t::find_fe_for_tuning_to_mux(db_txn& txn, const chdb::dvbc_mux_t& mux,
-																				const dvb_frontend_t* fe_to_release,
-																				const tune_options_t& tune_options) const;
-
-template std::shared_ptr<dvb_frontend_t>
-adaptermgr_t::find_fe_for_tuning_to_mux(db_txn& txn, const chdb::dvbt_mux_t& mux,
-																				const dvb_frontend_t* fe_to_release,
-																				const tune_options_t& tune_options) const;
-
-std::tuple<std::shared_ptr<dvb_frontend_t>, devdb::rf_path_t, devdb::lnb_t, devdb::resource_subscription_counts_t>
-adaptermgr_t::find_fe_and_lnb_for_tuning_to_mux(db_txn& txn, const chdb::dvbs_mux_t& mux,
-																								const devdb::rf_path_t* required_rf_path,
-																								const dvb_frontend_t* fe_to_release,
-																								const tune_options_t& tune_options) const {
-	return (static_cast<const dvbdev_monitor_t*>(this))
-		->find_fe_and_lnb_for_tuning_to_mux(txn, mux, required_rf_path, fe_to_release, tune_options);
 }

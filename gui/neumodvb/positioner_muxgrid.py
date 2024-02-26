@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -46,7 +46,7 @@ class positioner_mux_screen_t(object):
         assert(rowno==0)
         mux = self.parent.parent.tune_mux_panel.mux
         if mux is None:
-            mux = self.parent.InitialRecord()
+            mux = self.parent.parent.InitialRecord()
         return mux
 
     def update(self, txn):
@@ -82,9 +82,6 @@ class DvbsMuxTable(NeumoTable):
          CD(key='rolloff', label='rolloff'),
          CD(key='transmission_mode', label='transmission_mode')]
 
-    def InitialRecord(self):
-        return self.__new_record__()
-
     def __init__(self, parent, basic=False, *args, **kwds):
         initial_sorted_column = 'frequency'
         data_table= pychdb.dvbs_mux
@@ -101,7 +98,8 @@ class DvbsMuxTable(NeumoTable):
     def screen_getter_xxx(self, txn, sort_order):
         mux = self.parent.tune_mux_panel.mux
         if mux is None:
-            mux = self.InitialRecord()
+            mux = self.__new_record__()
+
         self.screen=screen_if_t(positioner_mux_screen_t(self), self.sort_order==2)
 
     def __new_record__(self):
@@ -129,7 +127,8 @@ class PositionerDvbsMuxGrid(NeumoGridBase):
 
     def OnKillFocus(self, evt):
         rowno = self.GetGridCursorRow()
-        self.DeselectRow(rowno)
+        if rowno >= 0:
+            self.DeselectRow(rowno)
 
     def OnKeyCheck(self, evt):
         """

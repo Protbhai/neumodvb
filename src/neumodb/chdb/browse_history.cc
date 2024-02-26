@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -21,8 +21,6 @@
 
 #include "receiver/neumofrontend.h"
 #include "neumodb/chdb/chdb_extra.h"
-#include "stackstring/ssaccu.h"
-#include "xformat/ioformat.h"
 #include <iomanip>
 #include <iostream>
 

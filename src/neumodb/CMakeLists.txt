@@ -1,6 +1,8 @@
-find_package(Python 3.7 REQUIRED) #3.5 is minimum version
+find_package(Python 3.7 REQUIRED) #3.7 is minimum version
 find_package(PythonLibs 3.7 REQUIRED)
 include_directories("${PYTHON_INCLUDE_DIR}")
+
+add_compile_options("$<$<CONFIG:DEBUG>:-DNDEBUG -O2 -ggdb>") #applies to subdirs as well
 
 add_library(neumodb SHARED neumodb.cc dbdesc.cc)
 add_dependencies(neumodb stackstring neumolmdb schema_generated_files)
@@ -30,6 +32,8 @@ target_link_libraries(testencode stackstring devdb chdb schema  neumolmdb neumod
 add_executable(testserialize testserialize.cc)
 target_link_libraries(testserialize stackstring devdb chdb neumodb pthread)
 
+add_executable(testvariant testvariant.cc)
+target_link_libraries(testvariant devdb chdb neumodb pthread)
 
 add_executable(testtempdb testtempdb.cc)
 add_dependencies(testtempdb devdb chdb neumodb schema dev_generated_files ch_generated_files)
@@ -40,7 +44,6 @@ pybind11_add_module(pydeser deserialize_pybind.cc  )
 #add_dependencies(pydeser schema_generated_files )
 target_compile_options(pydeser PUBLIC -fPIC -fsized-deallocation) #needed to prevent operator delete error
 target_link_libraries(pydeser PRIVATE neumoutil stackstring pyschemadb pyneumodb neumodb)
-
 
 
 add_subdirectory(devdb)
@@ -60,5 +63,5 @@ include_directories(
     $<INSTALL_INTERFACE:include>
 )
 
-install (TARGETS pyneumodb  DESTINATION ${Python_SITEARCH}/${PROJECT_NAME})
+install (TARGETS pyneumodb  DESTINATION ${Python_STDLIB}/${PROJECT_NAME})
 install(TARGETS neumoupgrade  DESTINATION bin)

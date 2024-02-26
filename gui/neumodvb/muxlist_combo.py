@@ -1,4 +1,4 @@
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -55,7 +55,6 @@ class DvbsMuxGridPopup(DvbsBasicMuxGrid):
         self.sat = sat
         super().OnWindowCreate(evt)
         self.SelectSat(sat)
-        self.SelectBand(lnb)
 
     def OnKeyDown(self, evt):
         keycode = evt.GetKeyCode()
@@ -119,7 +118,7 @@ class DvbsMuxListComboCtrl(wx.ComboCtrl):
         """
         Set sat from external (not by user)
         """
-        dtdebug(f'muxlist_combo received SetSat (old) {sat}')
+        dtdebug(f'muxlist_combo received SetSat {sat}')
         self.sat = sat
         if self.popup.popup_grid is not None:
             self.popup.popup_grid.SelectSat(sat)

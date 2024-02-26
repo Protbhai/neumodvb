@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -29,6 +29,7 @@ from neumodvb.chepglist import content_types
 from neumodvb.util import dtdebug, dterror, lastdot
 from neumodvb.neumodbutils import enum_to_str
 from neumodvb.record_dialog import show_record_dialog
+from neumodvb.autorec_dialog import show_autorec_dialog
 
 import pychdb
 import pyepgdb
@@ -131,7 +132,7 @@ class GridEpgData(GridData):
         if service is None:
             return None
         if self.epg_screens is None:
-            self.epg_screens = pyepgdb.gridepg_screen(self.start_time_unixepoch,
+            self.epg_screens = pyepgdb.gridepg_screen(self.start_time_unixepoch -3600,
                                                       self.parent.num_rows_on_screen, self.epg_sort_order)
         key = service.k if type(service) == pychdb.service.service else service.service
         epg_screen = self.epg_screens.epg_screen_for_service(key)
@@ -516,10 +517,12 @@ class ChEpgGridRow(GridRow):
                 epg_idx = -1
                 break
             epg_idx +=1
-            start_col = min(max(0, (epg_record.k.start_time - start_time)//self.grid.epg_duration_width),
-                            self.grid.num_cols)
-            end_col = min(max(0, (epg_record.end_time - start_time)//self.grid.epg_duration_width),
-                          self.grid.num_cols)
+            start_col = (epg_record.k.start_time - start_time)//self.grid.epg_duration_width
+            end_col = (epg_record.end_time - start_time)//self.grid.epg_duration_width
+            if end_col <= 0 or start_col >= self.grid.num_cols:
+                continue
+            start_col = min(max(0, start_col), self.grid.num_cols)
+            end_col = min(max(0, end_col), self.grid.num_cols)
             assert end_col >= start_col
             for idx in range (start_col, end_col+1):
                 oldepg = covered.get(idx, None)
@@ -791,6 +794,8 @@ class GroupSelectPanel(wx.Panel):
         grouptype_text = wx.TextCtrl(self, wx.ID_ANY, "", style= wx.TE_READONLY)
         grouptype_text.SetForegroundColour(wx.WHITE)
         grouptype_text.SetFont(self.header_font)
+        self.grouptype_text = grouptype_text
+        self.layout_grouptype()
 
         sorttype_text = wx.TextCtrl(self, wx.ID_ANY, "", style= wx.TE_READONLY)
         sorttype_text.SetForegroundColour('yellow')
@@ -800,13 +805,11 @@ class GroupSelectPanel(wx.Panel):
         self.top_sizer.Add((10,10), 1, 0, border=0)
         self.top_sizer.Add(sorttype_text, 0, wx.EXPAND, 0)
         self.top_sizer.Add((10,10), 1, 0, 0)
-        self.grouptype_text = grouptype_text
         self.sorttype_text = sorttype_text
         self.SetSizerAndFit(self.top_sizer)
         self.Bind(wx.EVT_CHILD_FOCUS, self.OnFocus)
         self.display_grouptype()
         self.display_sorttype()
-
 
 class SatBouquetGroupSelectPanel(GroupSelectPanel):
     def __init__(self, parent, *args, **kwds):
@@ -854,10 +857,8 @@ class SatBouquetGroupSelectPanel(GroupSelectPanel):
         else:
             return self.sorttypes_chgm
 
-    def display_grouptype(self):
-        idx = self.grouptype_idx
+    def layout_grouptype(self):
         t = pychdb.list_filter_type_t
-        self.grouptype_idx = idx
         txt, cmd, record_type = self.grouptypes[self.grouptype_idx]
         if record_type == t.SAT_SERVICES:
             txt = txt if self.group_select_in_progress or self.grouptype_text.HasFocus() else str(self.ls.filter_sat)
@@ -868,6 +869,9 @@ class SatBouquetGroupSelectPanel(GroupSelectPanel):
         w = max(w, self.grouptype_text_size[0])
         h = max(h, self.grouptype_text_size[1])
         self.grouptype_text.SetMinSize((w, h))
+
+    def display_grouptype(self):
+        self.layout_grouptype()
         wx.CallAfter(self.grouptype_text.Refresh)
 
     def activate_group(self):
@@ -1035,7 +1039,7 @@ class MosaicPanel(wx.Panel):
 
     def OnClose(self, evt):
         for player in self.mpv_players:
-            player.stop_play()
+            player.stop_play_and_exit()
         while len(self.glcanvases)>0:
             glcanvas = self.glcanvases[-1]
             self.RemoveMpvPlayer(glcanvas, force=True)
@@ -1296,7 +1300,7 @@ class RecordPanel(wx.Panel):
             dtdebug(f"Updating live service screen")
             old_record = self.selected_row_entry
             self.data.GetRecordAtRow.cache_clear()
-            self.SelectRow(old_record)
+            self.SelectRow(old_record, data_has_changed=True)
             #wx.CallAfter(self.Refresh)
 
     def on_timer(self):
@@ -1369,7 +1373,7 @@ class RecordPanel(wx.Panel):
         if entry is not None:
             old_top_idx = self.top_idx
             self.top_idx = self.data.row_screen.set_reference(entry)
-            self.update_rows(old_top_idx)
+            self.move_rows(old_top_idx)
             self.focus_row(w, 0)
 
     def OnDestroyWindow(self, evt):
@@ -1410,16 +1414,20 @@ class RecordPanel(wx.Panel):
         dtdebug('CALL SetFocus')
         self.rows[self.last_focused_rowno].SetFocus()
 
-    def update_rows(self, old_top_idx=None):
+    def move_rows(self, old_top_idx=None):
         assert old_top_idx is not None
         self.Freeze()
-        self.update_rows_(old_top_idx = old_top_idx)
+        self.move_rows_(old_top_idx = old_top_idx)
         self.Thaw()
         self.gbs.Layout()
         for rowno, row in enumerate(self.rows):
             assert rowno == row.rowno
 
-    def update_rows_(self, old_top_idx=None):
+    def move_rows_(self, old_top_idx=None):
+        """
+        put a different set of records on screen, assuming that underlying data has not
+        changed.
+        """
         if old_top_idx < self.top_idx:
             num_rows =self.top_idx - old_top_idx
             for row in self.rows[0:num_rows]:
@@ -1446,6 +1454,24 @@ class RecordPanel(wx.Panel):
                 self.rows[rowno] = self.RowClass(self, rowno)
                 self.rows[rowno].update()
 
+    def update_rows(self, old_top_idx=None):
+        assert old_top_idx is not None
+        self.Freeze()
+        self.update_rows_(old_top_idx = old_top_idx)
+        self.Thaw()
+        self.gbs.Layout()
+        for rowno, row in enumerate(self.rows):
+            assert rowno == row.rowno
+
+    def update_rows_(self, old_top_idx=None):
+        """
+        put a different set of records on screen, taking into account that underlying data has
+        changed.
+        """
+        assert old_top_idx is not None
+        for rowno in range(0, self.num_rows_on_screen):
+            #self.rows[rowno] = self.RowClass(self, rowno)
+            self.rows[rowno].update()
 
     def scroll_down(self, rows):
         old_top_idx = self.top_idx
@@ -1457,7 +1483,7 @@ class RecordPanel(wx.Panel):
                 self.top_idx = max(self.data.GetNumberRows() -1 - self.last_focused_rowno, 0)
             else:
                 self.top_idx = old_top_idx
-        self.update_rows(old_top_idx)
+        self.move_rows(old_top_idx)
         self.focus_row(None, self.last_focused_rowno)
         wx.CallAfter(self.update_scrollbar)
 
@@ -1552,11 +1578,11 @@ class RecordPanel(wx.Panel):
         is_ctrl = (modifiers & wx.ACCEL_CTRL)
         is_shift = (modifiers & wx.ACCEL_SHIFT)
         if not (is_ctrl or is_hft) and IsNumericKey(key):
-            from neumodvb.servicelist import IsNumericKey, ask_channel_number
+            from neumodvb.channelno_dialog import IsNumericKey, ask_channel_number
             chno = ask_channel_number(self, key- ord('0'))
             entry  = self.data.ls.entry_for_ch_order(chno)
             if entry is not None:
-                self.SelectRow(entry)
+                self.SelectRow(entry, data_has_changed=False)
             return
         else:
             evt.Skip(True)
@@ -1576,16 +1602,17 @@ class RecordPanel(wx.Panel):
         gtk_add_window_style(cell, 'cell')
         return cell
 
-
-    def SelectRow(self, record):
+    def SelectRow(self, record, data_has_changed):
         if record is not None:
             old_top_idx = self.top_idx
             self.top_idx = self.data.row_screen.set_reference(record)
-            self.update_rows(old_top_idx)
+            if data_has_changed:
+                new_top_idx = max(0, self.top_idx - (self.row_idx-old_top_idx))
+                self.update_rows(new_top_idx)
+            else:
+                self.move_rows(old_top_idx)
             self.focus_row(None, 0)
             self.data.OnSelectRow(record)
-
-
 
     def OnTune(self, event, replace_running):
         assert self.last_focused_cell is not None
@@ -1610,6 +1637,23 @@ class RecordPanel(wx.Panel):
         if self.last_focused_cell.data.is_ch:
             start_time = datetime.datetime.now(tz=tz.tzlocal())
             show_record_dialog(self, record, start_time = start_time)
+            return True
+        return False
+
+    def OnAutoRec(self, event):
+        assert self.last_focused_cell is not None
+        row = self.last_focused_cell.data.row
+        record = row.row_record
+        if self.last_focused_cell.data.is_ch:
+            start_time = datetime.datetime.now(tz=tz.tzlocal())
+            ret, autorec = show_autorec_dialog(self, record)
+            if ret == wx.ID_OK:
+                wx.GetApp().receiver.update_autorec(autorec)
+            elif ret ==wx.ID_DELETE: #delete
+                wx.GetApp().receiver.delete_autorec(autorec)
+            else:
+                pass
+
             return True
         return False
 
@@ -1655,17 +1699,18 @@ class GridEpgPanel(RecordPanel):
             if row.row_record is not None:
                 key = row.row_record.k if type(row.row_record) == pychdb.service.service else row.row_record.service
                 epg_screen = self.data.epg_screens.epg_screen_for_service(key)
-                #changed = epg_screen.update(txn_epg)
-                changed = epg_screen.update_between(txn_epg, self.data.start_time_unixepoch,
-                                                    self.data.end_time_unixepoch)
-                any_change |= changed
-                if changed:
-                    dtdebug(f"Updating service {row.row_record}")
-                    #self.epg_screens.remove_service(service)
-                    refocus = self.last_focused_cell is not None and self.last_focused_cell.data.row.rowno == row.rowno
-                    row.update()
-                    if refocus:
-                        row.focus_current()
+                if epg_screen is not None:
+                    #changed = epg_screen.update(txn_epg)
+                    changed = epg_screen.update_between(txn_epg, self.data.start_time_unixepoch,
+                                                        self.data.end_time_unixepoch)
+                    any_change |= changed
+                    if changed:
+                        dtdebug(f"Updating service {row.row_record}")
+                        #self.epg_screens.remove_service(service)
+                        refocus = self.last_focused_cell is not None and self.last_focused_cell.data.row.rowno == row.rowno
+                        row.update()
+                        if refocus:
+                            row.focus_current()
         txn_epg.abort()
         del txn_epg
         if any_change:
@@ -1714,13 +1759,13 @@ class GridEpgPanel(RecordPanel):
         else:
             self.rows[self.last_focused_rowno].focus_current()
 
-    def update_rows_(self, old_top_idx=None):
+    def move_rows_(self, old_top_idx=None):
         if old_top_idx < self.top_idx:
             self.remove_epg_data_for_rows(0, self.top_idx - old_top_idx)
         elif old_top_idx > self.top_idx:
             self.remove_epg_data_for_rows(self.top_idx - old_top_idx + len(self.rows),
                                                    len(self.rows))
-        super().update_rows_(old_top_idx = old_top_idx)
+        super().move_rows_(old_top_idx = old_top_idx)
 
     def DrawCurrentTime(self):
         now = self.now
@@ -1800,6 +1845,8 @@ class GridEpgPanel(RecordPanel):
         returns False if command is not handled here
         """
         is_ctrl = (modifier & wx.ACCEL_CTRL)
+        if not hasattr(w, 'data'):
+            return False
         row = w.data.row
         if key not in (wx.WXK_LEFT, wx.WXK_RIGHT):
             return super().Navigate(w, modifier, key)
@@ -1904,6 +1951,34 @@ class GridEpgPanel(RecordPanel):
         else:
             epg=self.last_focused_cell.data.epg
             show_record_dialog(self, service, epg=epg)
+            return True
+        return False
+
+    def OnAutoRec(self, event):
+        if super().OnAutoRec(event):
+            return True
+        row = self.last_focused_cell.data.row
+        service = row.row_record
+        assert not self.last_focused_cell.data.is_ch
+        if self.last_focused_cell.data.epg is None:
+            ret, autorec = show_autorec_dialog(self, service, start_time = self.last_focused_cell.data.start_time)
+            if ret == wx.ID_OK:
+                wx.GetApp().receiver.update_autorec(autorec)
+            elif ret ==wx.ID_DELETE: #delete
+                wx.GetApp().receiver.delete_autorec(autorec)
+            else:
+                pass
+            return True
+        else:
+            epg=self.last_focused_cell.data.epg
+            ret, autorec = show_autorec_dialog(self, service, epg=epg)
+            if ret == wx.ID_OK:
+                wx.GetApp().receiver.update_autorec(autorec)
+            elif ret ==wx.ID_DELETE: #delete
+                wx.GetApp().receiver.delete_autorec(autorec)
+            else:
+                pass
+
             return True
         return False
 
@@ -2194,7 +2269,7 @@ class RecordingsPanel(RecordPanel):
             dtdebug(f"Updating live service screen")
             old_record = self.selected_row_entry
             self.data.GetRecordAtRow.cache_clear()
-            self.SelectRow(old_record)
+            self.SelectRow(old_record, data_has_changed=True)
             #wx.CallAfter(self.Refresh)
 
     def Navigate(self, focused_widget, modifier, key):
@@ -2418,13 +2493,12 @@ class LivePanel(wx.Panel):
         main_sizer.Add(self.top_panel, 0, wx.EXPAND|wx.BOTTOM, border=5)
         main_sizer.Add(self.middle_panel, 2, wx.EXPAND)
         main_sizer.Add(self.bottom_panel, 1, wx.EXPAND)
-
+        self.main_sizer = main_sizer
         self.top_panel_layout()
         self.middle_panel_layout(rowtype)
         self.bottom_panel_layout()
+        self.SetSizerAndFit(main_sizer)
 
-        self.SetSizer(main_sizer)
-        self.main_sizer = main_sizer
         self.Layout()
 
     def OnTimer(self, evt):
@@ -2502,7 +2576,7 @@ class LivePanel(wx.Panel):
         key = evt.GetKeyCode()
         if not self.IsDescendant(w):
             return
-        from neumodvb.servicelist import IsNumericKey, ask_channel_number
+        from neumodvb.channelno_dialog import IsNumericKey, ask_channel_number
         modifiers = evt.GetModifiers()
         is_ctrl = (modifiers & wx.ACCEL_CTRL)
         is_shift = (modifiers & wx.ACCEL_SHIFT)
@@ -2579,6 +2653,30 @@ class LivePanel(wx.Panel):
         else:
             return self.grid_panel.OnToggleRecord(event)
 
+    def CmdAutoRec(self, event):
+        if self.hidden:
+            self.OnAutoRec()
+        else:
+            return self.grid_panel.OnAutoRec(event)
+
+    def CmdAudioLang(self, event):
+        dtdebug('CmdAudioLang')
+        dark_mode = True # self.current_panel() == self.live_panel
+        return wx.GetApp().AudioLang(dark_mode)
+
+    def CmdSubtitleLang(self, event):
+        dtdebug('CmdSubtitleLang')
+        dark_mode = True # self.current_panel() == self.live_panel
+        return wx.GetApp().SubtitleLang(dark_mode)
+
+    def CmdChannelScreenshot(self, event):
+        dtdebug("CmdChannelScreenshot")
+        self.app.current_mpv_player.screenshot()
+
+    def CmdToggleOverlay(self, event):
+        dtdebug('CmdToggleOverlay')
+        return wx.GetApp().ToggleOverlay()
+
     def OnToggleLiveRecord(self):
         ls = wx.GetApp().live_service_screen
         service = ls.selected_service
@@ -2591,6 +2689,10 @@ class LivePanel(wx.Panel):
 
     def CmdFullScreen(self, evt):
         return self.parent.CmdFullScreen(evt)
+
+    def CmdPause(self, event):
+        dtdebug('CmdPause')
+        return wx.GetApp().Pause()
 
     def CmdStop(self, event):
         dtdebug('CmdStop')

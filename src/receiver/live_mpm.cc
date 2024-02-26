@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -18,9 +18,6 @@
  *
  */
 #include "active_service.h"
-#include "date/date.h"
-#include "date/iso_week.h"
-#include "date/tz.h"
 #include "mpm.h"
 #include "receiver.h"
 #include "util/dtassert.h"
@@ -35,9 +32,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
-
-using namespace date;
-using namespace date::clock_cast_detail;
+#include "fmt/chrono.h"
+using namespace std::chrono;
 namespace fs = std::filesystem;
 
 #ifndef NDEBUG
@@ -45,39 +41,16 @@ static void  testf(db_txn& txn, recdb::file_t& file) {
 	auto c = recdb::find_first<recdb::file_t>(txn);
 	for(auto f: c.range()) {
 		if(f.k.stream_time_start == file.k.stream_time_start && f.fileno != file.fileno) {
-			printf("here\n");
 			assert(0);
 		}
 	}
 }
 #endif
 
-
-
-void meta_marker_t::update_epg(const epgdb::epg_record_t& epg) {
-	livebuffer_desc.epg = epg;
-	last_epg_update_time = now;
-}
-
-bool meta_marker_t::need_epg_update(system_time_t play_time_) const {
-	auto play_time = system_clock_t::to_time_t(play_time_);
-	if (play_time >= livebuffer_desc.epg.end_time || play_time < livebuffer_desc.epg.k.start_time) {
-		auto t = now - last_epg_update_time; //last time epg was written
-		if (t <= 2h) {
-			// dtdebug("Will not update epg now");
-			/*avoid to frequent checks for non-existing
-				records. epg code will update new values
-				anyway*/
-			return false;
-		} else {
-			return true;
-		}
-	}
-	return false;
-}
-
-epgdb::epg_record_t meta_marker_t::get_current_epg() const {
-	return livebuffer_desc.epg;
+static ss::string<128> relfilename(const recdb::file_t & file) {
+	ss::string<128> ret;
+	ret.format("{:02d}_{:%Y%m%d_%T}.ts", file.fileno, fmt::localtime(file.real_time_start));
+	return ret;
 }
 
 void meta_marker_t::init(system_time_t now) {
@@ -92,7 +65,7 @@ void meta_marker_t::init(system_time_t now) {
 
 void meta_marker_t::register_playback_client(playback_mpm_t* client) {
 	if (std::find(playback_clients.begin(), playback_clients.end(), client) != playback_clients.end()) {
-		dterror("Attempting to register client which is already registered");
+		dterrorf("Attempting to register client which is already registered");
 		return;
 	}
 	playback_clients.push_back(client);
@@ -101,7 +74,7 @@ void meta_marker_t::register_playback_client(playback_mpm_t* client) {
 void meta_marker_t::unregister_playback_client(playback_mpm_t* client) {
 	auto it = std::find(playback_clients.begin(), playback_clients.end(), client);
 	if (it == playback_clients.end()) {
-		dterror("Attempting to unregister client which is not registered");
+		dterrorf("Attempting to unregister client which is not registered");
 		return;
 	}
 	playback_clients.erase(it);
@@ -136,7 +109,7 @@ void meta_marker_t::wait_for_update(meta_marker_t& other, std::mutex& mutex) {
 			 last_streams.packetno_start>=0); //pmt was received
 		if (!other.started) {
 			if (ret) {
-				dtdebugx("metamarker WAIT safe_to_read=%ld ret=%d", num_bytes_safe_to_read, ret);
+				dtdebugf("metamarker WAIT safe_to_read={:d} ret={:d}", num_bytes_safe_to_read, ret);
 				other.started = true;
 			}
 		}
@@ -172,7 +145,7 @@ int meta_marker_t::update_from_db(db_txn& txn, recdb::marker_t& end_marker) {
 	using namespace recdb;
 	auto c = find_last<recdb::marker_t>(txn);
 	if (!c.is_valid()) {
-		dterror("Could not obtain last marker");
+		dterrorf("Could not obtain last marker");
 		return -1;
 	}
 	end_marker = c.current();
@@ -185,14 +158,14 @@ int meta_marker_t::update_from_db(db_txn& txn, recdb::marker_t& end_marker, mill
 	last_seen_txn_id = txn.txn_id();
 	auto c = recdb::marker_t::find_by_key(txn, recdb::marker_key_t(start_play_time), find_geq);
 	if (!c.is_valid()) {
-		dtdebug("Could not obtain marker for time " << start_play_time);
+		dtdebugf("Could not obtain marker for time {}", start_play_time);
 		return -1;
 	}
 	current_marker = c.current();
 	if (need_file_record) {
 		auto cf = recdb::file_t::find_by_fileno(txn, current_file_record.fileno, find_eq);
 		if (!cf.is_valid()) {
-			dterror("Could not read current_file_record");
+			dterrorf("Could not read current_file_record");
 			return -1;
 		}
 		current_file_record = cf.current();
@@ -200,7 +173,7 @@ int meta_marker_t::update_from_db(db_txn& txn, recdb::marker_t& end_marker, mill
 	using namespace recdb;
 	c = find_last<recdb::marker_t>(txn);
 	if (!c.is_valid()) {
-		dterror("Could not obtain last marker");
+		dterrorf("Could not obtain last marker");
 		return -1;
 	}
 	end_marker = c.current();
@@ -217,16 +190,6 @@ mpm_index_t::mpm_index_t(const char* idx_dirname_)
 */
 void mpm_index_t::open_index() {
 	mpm_rec.open(idx_dirname.c_str());
-}
-
-
-/*!
-	blocks until new data is inserted by live_parent; returns -1 if no more data will come.
-	Otherwise returns 0
-*/
-int mpm_index_t::wait_for_data(int old_txnid) {
-	mpm_rec.idxdb.wait_for_activity(old_txnid);
-	return 0;
 }
 
 mpm_t::mpm_t(bool readonly)
@@ -265,7 +228,7 @@ active_mpm_t::active_mpm_t(active_service_t* parent_, system_time_t now)
 		for (const auto& e : pat_services.entries) {
 			if (e.service_id == active_service->current_service.k.service_id) {
 				active_service->have_pat = true;
-				dtdebugx("PAT START PMT=0x%x", e.pmt_pid);
+				dtdebugf("PAT START PMT=0x{:x}", e.pmt_pid);
 				active_service->update_pmt_pid(e.pmt_pid);
 				active_service->pmt_parser = stream_parser.register_pmt_pid(e.pmt_pid, e.service_id);
 				active_service->pmt_parser->section_cb =
@@ -291,16 +254,17 @@ ss::string<128> active_mpm_t::make_dirname(active_service_t* active_service, sys
 		2. After changing channel on the same mux, directory already exists
 	*/
 	ss::string<128> dirname;
-	dirname.sprintf("%s/A%02d_ts%05d_sid%05d", active_service->receiver.options.readAccess()->live_path.c_str(),
+	dirname.format("{:s}/A{:02d}_t{:05d}_sid{:05d}_{:%Y%m%d_%T}",
+								 active_service->receiver.options.readAccess()->live_path.c_str(),
 									active_service->get_adapter_no(), active_service->current_service.k.ts_id,
-									active_service->current_service.k.service_id);
-	dirname << date::format("_%Y%m%d_%H:%M:%S", zoned_time(current_zone(), floor<std::chrono::seconds>(start_time)));
+								 active_service->current_service.k.service_id,
+								 fmt::localtime(std::chrono::system_clock::to_time_t(start_time)));
 	return dirname;
 }
 
 void active_mpm_t::mkdir(const char* dirname) {
 	if (!mkpath(dirname)) {
-		dterrorx("Could not create dir %s", dirname);
+		dterrorf("Could not create dir {}", dirname);
 		throw std::runtime_error("Failed to create live buffer");
 	}
 }
@@ -311,10 +275,9 @@ void active_mpm_t::mkdir(const char* dirname) {
 */
 void active_mpm_t::create() {
 	mkdir(dirname.c_str());
-	db->idx_dirname << dirname << "/"
-									<< "index.mdb";
+	db->idx_dirname.format("{}/index.mdb", dirname);
 	if (!mkpath(db->idx_dirname)) {
-		dterrorx("Could not create dir %s", db->idx_dirname.c_str());
+		dterrorf("Could not create dir {}", db->idx_dirname.c_str());
 		throw std::runtime_error("Failed to create live buffer");
 	}
 	db->open_index();
@@ -325,7 +288,7 @@ void active_mpm_t::create() {
 void active_mpm_t::destroy() {
 	std::error_code ec;
 	if (!fs::remove_all(dirname.c_str(), ec)) {
-		dterror("Error deleting " << dirname << ":" << ec.message());
+		dterrorf("Error deleting {}:{}", dirname, ec.message());
 		throw std::runtime_error("Failed to remove live buffer");
 	}
 }
@@ -348,7 +311,7 @@ void active_mpm_t::transfer_filemap(int fd, int64_t new_num_bytes_safe_to_read) 
 		auto* start = filemap.buffer + num_bytes_processed;
 		auto num_bytes_to_move = filemap.write_pointer - num_bytes_processed;
 		assert(num_bytes_processed == filemap.write_pointer - num_bytes_to_move);
-		dtdebugx("Moving %ld bytes to new file", num_bytes_to_move);
+		dtdebugf("Moving {:d} bytes to new file", num_bytes_to_move);
 		memcpy(newfilemap.buffer, start, num_bytes_to_move);
 		newfilemap.decrypt_pointer = filemap.decrypt_pointer - num_bytes_processed;
 		newfilemap.write_pointer = filemap.write_pointer - num_bytes_processed;
@@ -357,11 +320,11 @@ void active_mpm_t::transfer_filemap(int fd, int64_t new_num_bytes_safe_to_read) 
 		assert(num_bytes_processed == filemap.write_pointer);
 	}
 	if (filemap.fd >= 0) {
-		dtdebugx("TRUNCATE from =%ld to %ld new_num_bytes_safe_to_read=%ld", filesize_fd(filemap.fd),
+		dtdebugf("TRUNCATE from ={:d} to {:d} new_num_bytes_safe_to_read={:d}", filesize_fd(filemap.fd),
 						 num_bytes_processed + filemap.offset, new_num_bytes_safe_to_read);
 		// assert(new_num_bytes_safe_to_read<= num_bytes_processed +filemap.offset);
 		if (ftruncate(filemap.fd, num_bytes_processed + filemap.offset) < 0) {
-			dterror("Error while truncating " << strerror(errno));
+			dterrorf("Error while truncating {}", strerror(errno));
 		}
 		filemap.unmap();
 		filemap.close();
@@ -379,10 +342,9 @@ void active_mpm_t::transfer_filemap(int fd, int64_t new_num_bytes_safe_to_read) 
 	epgrec is needed to compute start_time
 
 */
-recdb::rec_t active_mpm_t::start_recording(subscription_id_t subscription_id, recdb::rec_t rec /*on purpose not a reference!*/) {
-	// auto now = time(NULL); //@todo replace following call
-	// auto packetno_start =  stream_parser.event_handler.last_saved_marker.packetno_start;
-	// auto packetno_end = std::numeric_limits<int64_t>::max();
+recdb::rec_t active_mpm_t::start_recording(
+	subscription_id_t subscription_id, recdb::rec_t rec /*on purpose not a reference!*/) {
+
 	{
 		auto mm = meta_marker.readAccess();
 		rec.stream_time_start = mm->livebuffer_stream_time_start;
@@ -390,13 +352,11 @@ recdb::rec_t active_mpm_t::start_recording(subscription_id_t subscription_id, re
 	}
 	rec.stream_time_end = stream_parser.event_handler.last_saved_marker.k.time;
 	rec.epg.rec_status = epgdb::rec_status_t::IN_PROGRESS;
-	rec.subscription_id = (int) subscription_id;
-
-	// TODO: times in start_play_time may have a different sign than stream_times (which can be both negative and
+	// TODO: times in start_play_time may have a different sign than stream_time (which can be both negative and
 	// positive)
 	using namespace recdb;
 	num_recordings_in_progress++;
-	dtdebugx("num_recordings_in_progress changed to %d", num_recordings_in_progress);
+	dtdebugf("num_recordings_in_progress changed to {:d}", num_recordings_in_progress);
 	using namespace recdb;
 	using namespace recdb::rec;
 	if (rec.filename.size() == 0)
@@ -406,11 +366,6 @@ recdb::rec_t active_mpm_t::start_recording(subscription_id_t subscription_id, re
 	auto rectxn = db->mpm_rec.recdb.wtxn();
 
 	put_record(rectxn, rec);
-	// now also update the recording status in the livebuffer's epg record
-	auto recepgtxn = rectxn.child_txn(db->mpm_rec.recepgdb);
-	put_record(recepgtxn, rec.epg);
-	recepgtxn.commit();
-
 	rectxn.commit();
 	return rec;
 }
@@ -437,16 +392,21 @@ void mpm_copylist_t::run(db_txn& txn) {
 	using namespace recdb;
 	auto c = find_first<recdb::file_t>(txn);
 	for (auto file : c.range()) {
-		auto& fname = file.filename;
-		auto src = src_dir / fname.c_str();
-		auto dst = dst_dir / fname.c_str();
+		if (file.fileno < fileno_offset)
+			continue;
+		auto& dstfname = file.filename;
+		auto f = file;
+		f.fileno -= fileno_offset;
+		auto srcfname = ::relfilename(f);
+		auto src = src_dir / srcfname.c_str();
+		auto dst = dst_dir / dstfname.c_str();
 		fs::create_hard_link(src, dst, ec); /*
 																					TODO: tis part could be too slow in some cases (especially if link is replaced
 																					by copy) In that case, the linking can be done in another thread provided the
 																					rec_t record is not deleted in the livebuffer yet. This prevents the
 																					recording's data from being deleted before it is linked/copied*/
 		if (ec) {
-			dterror("Error hardlinking " << src.c_str() << " to " << dst.c_str() << ":" << ec.message());
+			dterrorf("Error hardlinking {} to {}: {}", src.c_str(), dst.c_str(), ec.message());
 		}
 	}
 }
@@ -455,16 +415,19 @@ void mpm_copylist_t::run(db_txn& txn) {
 	copy data and database records from a live recording into a recording
 	TODO: this code needs to be also called from the livebuffer cleanup code,
 	to recover after a crash
+
+	called from recmgr at startup to clean old livebuffers
+	Also called from active_mpmt_t at end of recording
 */
 
-int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db) {
+int finalize_recording(db_txn& livebuffer_idxdb_rtxn, mpm_copylist_t& copy_command, mpm_index_t* db) {
 	// filesystem location where recording will be stored
 	auto& destdir = copy_command.dst_dir;
 	auto& rec = copy_command.rec;
 	auto dbdir = destdir / "index.mdb"; // location of the recording's database
 	// create directory in which to store the recording and the recording's database directory
 	if (!mkpath(dbdir.c_str())) {
-		dterrorx("Could not create dir %s", dbdir.c_str());
+		dterrorf("Could not create dir {}", dbdir.c_str());
 		throw std::runtime_error("Failed to create database dir");
 	}
 
@@ -473,8 +436,6 @@ int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db) {
 
 	recidx.open_index();
 	auto rec_txn = recidx.mpm_rec.recdb.wtxn(); // txn for the new mpm recording database
-
-	auto txn = db->mpm_rec.idxdb.rtxn(); // for accessing the livebuffer's database
 
 	auto start = rec.real_time_start;
 	auto end = rec.real_time_end;
@@ -492,7 +453,7 @@ int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db) {
 	milliseconds_t stream_time_offset{};
 	int64_t packetno_offset{0};
 	int64_t stream_packetno_start{-1};
-	int fileno_offset{0};
+
 	using namespace recdb;
 	{
 		/* if files already exist from an earlier recording (e.g., recording has restarted after a crash) ,
@@ -501,12 +462,13 @@ int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db) {
 		if (c.is_valid()) {
 			const auto& last = c.current();
 			stream_time_offset = last.stream_time_end;
-			fileno_offset = last.fileno + 1;
+			copy_command.fileno_offset = last.fileno + 1;
 			packetno_offset = last.stream_packetno_end;
 		}
 	}
 	{ // copy the file records into the database
-		auto c = find_first<recdb::file_t>(txn);
+		auto c = find_first<recdb::file_t>(livebuffer_idxdb_rtxn);
+
 		for (auto f : c.range()) {
 			bool not_finalised = (f.stream_time_end == std::numeric_limits<milliseconds_t>::max());
 			if (not_finalised)
@@ -518,10 +480,10 @@ int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db) {
 					stream_time_start = f.k.stream_time_start;
 				}
 				if (not_finalised) {
-					dterrorx("File in recording was not finalised");
-					auto c = find_last<recdb::marker_t>(txn);
+					dterrorf("File in recording was not finalised");
+					auto c = find_last<recdb::marker_t>(livebuffer_idxdb_rtxn);
 					if (!c.is_valid()) {
-						dterror("no index records");
+						dterrorf("no index records");
 					} else {
 						auto marker = c.current();
 						stream_time_end = marker.k.time;
@@ -530,7 +492,10 @@ int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db) {
 						assert(f.stream_packetno_end != std::numeric_limits<int64_t>::max());
 					}
 				}
-				f.fileno += fileno_offset;
+				f.fileno += copy_command.fileno_offset;
+				if(copy_command.fileno_offset !=0) {
+					f.filename= ::relfilename(f);
+				}
 				f.k.stream_time_start += stream_time_offset;
 				f.stream_packetno_start += packetno_offset;
 				f.stream_packetno_end += packetno_offset;
@@ -546,7 +511,7 @@ int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db) {
 	}
 	{																								// copy the marker records into the database
 		recdb::marker_key_t k(rec.stream_time_start); // refers to the livebuffer's value (no offset!)
-		auto c = recdb::marker_t::find_by_key(txn, k, find_geq);
+		auto c = recdb::marker_t::find_by_key(livebuffer_idxdb_rtxn, k, find_geq);
 		for (auto marker : c.range()) {
 			if (marker.k.time <= stream_time_end) {
 				if(stream_packetno_start<0)
@@ -564,7 +529,7 @@ int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db) {
 	{
 // copy the stream_descriptor markers into the recording database
 		auto c = recdb::stream_descriptor_t::find_by_key
-			(txn,
+			(livebuffer_idxdb_rtxn,
 			 stream_packetno_start, // refers to the livebuffer's value (no offset!)
 			 find_leq);
 		for (auto sd : c.range()) {
@@ -579,24 +544,7 @@ int finalize_recording(mpm_copylist_t& copy_command, mpm_index_t* db) {
 	}
 
 	idx_txn.commit();
-
-
-#if 1 // perhaps not needed; epg is already in rec record
-	{
-		auto src_txn = db->mpm_rec.recepgdb.rtxn(); // for accessing the livebuffer's database
-		auto dst_txn = rec_txn.child_txn(recidx.mpm_rec.recepgdb);
-		// copy epg records
-		auto c = epgdb::find_first<epgdb::epg_record_t>(src_txn);
-		for (const auto& epg_record : c.range()) {
-			if (overlap_duration(start, end, epg_record.k.start_time, epg_record.end_time) > 0) {
-				put_record(dst_txn, epg_record);
-			}
-		}
-		dst_txn.commit();
-	}
-#endif
 	rec_txn.commit();
-	txn.abort();
 	return 0;
 }
 
@@ -613,18 +561,18 @@ int active_mpm_t::stop_recording(const recdb::rec_t& rec_in, mpm_copylist_t& cop
 	auto rec1_txn = db->mpm_rec.recdb.rtxn();
 	auto c = recdb::rec_t::find_by_key(rec1_txn, rec_in.epg.k, find_eq);
 	if (!c.is_valid()) {
-		dterror("Stopping a non existing recording");
+		dterrorf("Stopping a non existing recording");
 		return -1;
 	}
 	auto rec = c.current(); // most uptodate version of record
 	if (rec.epg.rec_status == epgdb::rec_status_t::FINISHED) {
-		dtdebug("recording was already stopped");
+		dtdebugf("recording was already stopped");
 		return -1;
 	}
 	rec1_txn.abort();
 	{
 		auto ret = next_data_file(now, -1);
-		dtdebugx("Closed last mpm part as part of ending recording ret=%d", ret);
+		dtdebugf("Closed last mpm part as part of ending recording ret={:d}", ret);
 	}
 	assert(num_recordings_in_progress > 0);
 	rec.stream_time_end = stream_parser.event_handler.last_saved_marker.k.time;
@@ -633,13 +581,7 @@ int active_mpm_t::stop_recording(const recdb::rec_t& rec_in, mpm_copylist_t& cop
 	rec.epg.rec_status = epgdb::rec_status_t::FINISHING;
 	auto rec_txn = db->mpm_rec.recdb.wtxn(); // we need to reopen transaction. next_data_file opended its own transaction
 	num_recordings_in_progress--;
-	dtdebugx("num_recordings_in_progress changed to %d", num_recordings_in_progress);
-
-	// now also update teh recording status in the livebuffer's epg record
-	auto recepg_txn = rec_txn.child_txn(db->mpm_rec.recepgdb);
-	put_record(recepg_txn, rec.epg);
-	recepg_txn.commit();
-
+	dtdebugf("num_recordings_in_progress changed to {:d}", num_recordings_in_progress);
 	// filesystem location where recording will be stored
 
 	rec.epg.rec_status =
@@ -651,11 +593,13 @@ int active_mpm_t::stop_recording(const recdb::rec_t& rec_in, mpm_copylist_t& cop
 		fs::path(active_service->receiver.options.readAccess()->recordings_path.c_str()) / fs::path(rec.filename.c_str());
 	copy_command = mpm_copylist_t(fs::path(dirname.c_str()), destdir, rec);
 
-	::finalize_recording(copy_command, db.get());
+	auto livebuffer_idxdb_rtxn = db->mpm_rec.idxdb.rtxn(); // for accessing the livebuffer's database
+	::finalize_recording(	livebuffer_idxdb_rtxn, copy_command, db.get());
+	livebuffer_idxdb_rtxn.abort();
 	return 0;
 }
 
-void active_mpm_t::forget_recording(const recdb::rec_t& rec) {
+void active_mpm_t::forget_recording_in_livebuffer(const recdb::rec_t& rec) {
 	/*delete the recording in the livebuffer's database, marking that recording has been
 		successfully moved to the recording
 	*/
@@ -669,9 +613,6 @@ void active_mpm_t::forget_recording(const recdb::rec_t& rec) {
 void active_mpm_t::update_recording(recdb::rec_t& rec, const chdb::service_t& service,
 																		const epgdb::epg_record_t& epgrec) {
 	auto rec_wtxn = db->mpm_rec.recdb.wtxn();
-	auto recepg_txn = rec_wtxn.child_txn(db->mpm_rec.recepgdb);
-	update_recording_epg(recepg_txn, rec, epgrec);
-	recepg_txn.commit();
 	rec_wtxn.commit();
 }
 
@@ -692,10 +633,14 @@ void active_mpm_t::update_recordings(db_txn& parent_txn, system_time_t now) {
 			// rec.stream_packetno_end = stream_parser.event_handler.last_saved_marker.packetno_end;
 			rec.real_time_end = system_clock_t::to_time_t(now);
 			num++;
+#if 0
 			put_record_at_key(cr, cr.current_serialized_primary_key(), rec);
+#else
+			update_record_at_cursor(cr, rec);
+#endif
 		}
 		if (num_recordings_in_progress != num) {
-			dtdebugx("num_recordings_in_progress changed from %d to %d", num_recordings_in_progress, num);
+			dtdebugf("num_recordings_in_progress changed from {:d} to {:d}", num_recordings_in_progress, num);
 		}
 		num_recordings_in_progress = num;
 	}
@@ -719,48 +664,43 @@ int close_last_mpm_part(db_txn& idx_txn, const ss::string_& dirname) {
 	int ret = 0;
 	if (cmarker.is_valid()) {
 		last_marker = cmarker.current();
-	}
-	{
-		dterror("Could not find last marker in mpm");
+	} else  {
+		dterrorf("Could not find last marker in mpm");
 		return -1;
 	}
 
 	auto cfile = find_last<recdb::file_t>(idx_txn);
 	if (cfile.is_valid()) {
 		last_file = cfile.current();
-	}
-	{
-		dterror("Could not find last file in mpm");
+	} else  {
+		dterrorf("Could not find last file in mpm");
 		return -1;
 	}
 
 	auto end_packet = last_marker.packetno_end;
-	auto first_packet = last_marker.packetno_start;
+	auto first_packet = last_file.stream_packetno_start;
 
 	bool not_finalised = (last_file.stream_packetno_end == std::numeric_limits<int64_t>::max());
 	if (not_finalised) {
 		assert(last_file.fileno >= 0);
-		auto file_duration_seconds = int64_t(last_file.stream_time_end - last_file.k.stream_time_start) / 1000;
+		last_file.stream_time_end = last_marker.k.time;
+		auto file_duration_seconds = (500+int64_t(last_file.stream_time_end - last_file.k.stream_time_start)) / 1000;
 		last_file.real_time_end = last_file.real_time_start + file_duration_seconds;
 		last_file.stream_packetno_end = last_marker.packetno_end;
 #ifndef NDEBUG
 				testf(idx_txn, last_file);
 #endif
 		put_record(idx_txn, last_file);
-		dtdebug("Finalized last_file");
+		dtdebugf("Finalized last_file");
 	}
 
-	ss::string<256> filename;
-	filename.sprintf("%s/%02d", dirname.c_str(), last_file.fileno);
-
-	filename << date::format("%Y%m%d_%H%M%S",
-													 zoned_time(current_zone(), floor<std::chrono::seconds>(
-																				system_clock::from_time_t(last_file.real_time_start))))
-					 << ".ts";
+	ss::string<128> filename;
+	auto fname = ::relfilename(last_file);
+	filename.format("{:s}/{:s}", dirname.c_str(), fname.c_str());
 
 	auto* fp_out = fopen64(filename.c_str(), "a");
 	if (!fp_out) {
-		dterror_nice("Could not create output file " << filename.c_str());
+		dterror_nicef("Could not create output file {}", filename);
 		idx_txn.abort();
 		ret = -1;
 	} else {
@@ -769,7 +709,7 @@ int close_last_mpm_part(db_txn& idx_txn, const ss::string_& dirname) {
 		auto num_bytes_in_last_file = (end_packet - first_packet) * (int64_t)ts_packet_t::size;
 
 		if (ftruncate(fd, num_bytes_in_last_file) < 0) {
-			dterror("Error while truncating " << strerror(errno));
+			dterrorf("Error while truncating {}", strerror(errno));
 			fclose(fp_out);
 			ret = -1;
 		}
@@ -813,47 +753,40 @@ int active_mpm_t::next_data_file(system_time_t now, int64_t new_num_bytes_safe_t
 
 	auto new_file_stream_time_start = stream_time_end;
 	auto new_file_stream_packetno_start = end_packet;
+	mm->current_file_record.real_time_start = system_clock_t::to_time_t(now);
+	mm->current_file_record.fileno = current_fileno;
 
-	ss::string<128> relfilename;
-	relfilename.sprintf("%02d_", current_fileno);
-
-	relfilename << date::format("%Y%m%d_%H%M%S", zoned_time(current_zone(), floor<std::chrono::seconds>(now))) << ".ts";
+	auto relfilename  = ::relfilename(mm->current_file_record);
 
 	current_filename.clear();
-	current_filename.sprintf("%s/%s", dirname.c_str(), relfilename.c_str());
+	current_filename.format("{:s}/{:s}", dirname.c_str(), relfilename.c_str());
 
 	auto* fp_out = fopen64(current_filename.c_str(), "w+");
 	if (!fp_out) {
-		dterror_nice("Could not create output file " << current_filename.c_str());
+		dterror_nicef("Could not create output file {}", current_filename);
 		idx_txn.abort();
 		return -1;
 	}
 	int fd = fileno(fp_out);
 	if (ftruncate(fd, initial_file_size) < 0) {
-		dterror("Error while truncating " << strerror(errno));
+		dterrorf("Error while truncating {}", strerror(errno));
 		idx_txn.abort();
 		fclose(fp_out);
 		return -1;
 	}
-	dtdebug("Start streaming to " << current_filename.c_str());
+	dtdebugf("Start streaming to {}", current_filename);
 
 	if (setvbuf(fp_out, NULL, _IONBF, 0)) // TODO: is this needed?
-		dterror("setvbuf failed: " << strerror(errno));
+		dterrorf("setvbuf failed: {}", strerror(errno));
 	transfer_filemap(fd, new_num_bytes_safe_to_read);
 	mm->num_bytes_safe_to_read = new_num_bytes_safe_to_read;
 	// mm->current_marker = 	stream_parser.event_handler.last_saved_marker;
 	mm->current_file_record.k.stream_time_start = new_file_stream_time_start;
 	mm->current_file_record.stream_time_end = std::numeric_limits<milliseconds_t>::max(); // signifies infinite
-	mm->current_file_record.real_time_start = system_clock_t::to_time_t(now);
-	mm->current_file_record.fileno = current_fileno;
 	mm->current_file_record.real_time_end = std::numeric_limits<time_t>::max(); // signifies infinite
 	mm->current_file_record.stream_packetno_start = new_file_stream_packetno_start;
 	mm->current_file_record.stream_packetno_end = std::numeric_limits<int64_t>::max(); // signifies infinite
 	mm->current_file_record.filename = relfilename;
-	if (mm->need_epg_update(now)) {
-		dtdebugx("Updating epg for live service");
-		active_service->update_epg_(idx_txn, now, &*mm);
-	}
 
 	self_check(*mm);
 #if 0
@@ -880,7 +813,7 @@ void active_mpm_t::close() {
 	filemap.unmap();
 	filemap.close();
 	// TODO: check that parser is complete destroyed
-	dtdebugx("mpm close");
+	dtdebugf("mpm close");
 }
 
 /*
@@ -912,7 +845,7 @@ void active_mpm_t::process_channel_data() {
 	auto start = steady_clock_t::now();
 	for (;;) {
 		if (steady_clock_t::now() - start > 500ms) {
-			dtdebug("SKIPPING EARLY\n");
+			dtdebugf("SKIPPING EARLY\n");
 			break;
 		}
 
@@ -944,17 +877,17 @@ void active_mpm_t::process_channel_data() {
 																										&active_service->open_pids);
 		if (ret < 0) {
 			if (errno == EINTR) {
-				// dtdebug("Interrupt received (ignoring)");
+				// dtdebugf("Interrupt received (ignoring)");
 				continue;
 			}
 			if (errno == EOVERFLOW) {
-				dtdebug_nice("OVERFLOW");
+				dtdebug_nicef("OVERFLOW");
 				continue;
 			}
 			if (errno == EAGAIN) {
 				break; // no more data
 			} else {
-				dterror("error while reading: " << strerror(errno));
+				dterrorf("error while reading: {}", strerror(errno));
 				break;
 			}
 		}
@@ -963,7 +896,7 @@ void active_mpm_t::process_channel_data() {
 			return;
 
 		if (ret % ts_packet_t::size != 0) {
-			dterrorx("ret=%ld ret%%188=%ld\n", ret, ret % ts_packet_t::size);
+			dterrorf("ret={:d} ret%%188={:d}", ret, ret % ts_packet_t::size);
 		}
 		/*decrypt as many bytes as possible.
 			In case stream is not encrypted, we just move the decrypt pointer.
@@ -1044,7 +977,7 @@ void active_mpm_t::process_channel_data() {
 
 		num_bytes_read += ret;
 #if 0
-		dtdebug_nicex("MPM STATUS: read=%ld parsed=%d decrypted=%ld", num_bytes_read,
+		dtdebug_nicex("MPM STATUS: read={:d} parsed={:d} decrypted={:d}", num_bytes_read,
 									stream_parser.event_handler.last_saved_marker.packetno_end*ts_packet_t::size,
 									num_bytes_decrypted);
 #endif
@@ -1064,15 +997,14 @@ void active_mpm_t::process_channel_data() {
 			mm->num_bytes_safe_to_read = num_bytes_decrypted;
 			if (!mm->started && mm->num_bytes_safe_to_read > 0) {
 				mm->started = true;
-				dtdebugx("notifying metamarker: safe_to_read=%ld", mm->num_bytes_safe_to_read);
+				dtdebugf("notifying metamarker: safe_to_read={:d}", mm->num_bytes_safe_to_read);
 			}
-			update_epg_if_needed(&*mm);
 			self_check(*mm);
 			//		TODO: add num_bytes_decrypted??? How to save time at start? e.g., first minute alway safe to read?
 			mm->cv.notify_all();
 		}
 		if (num_bytes_read % dtdemux::ts_packet_t::size != 0) {
-			dtdebugx("Read partial packet: num_bytes_read=%ld num_bytes_read%%188=%ld", num_bytes_read,
+			dtdebugf("Read partial packet: num_bytes_read={:d} num_bytes_read%%188={:d}", num_bytes_read,
 							 num_bytes_read % dtdemux::ts_packet_t::size);
 		}
 	}
@@ -1095,10 +1027,11 @@ bool active_mpm_t::file_used_by_recording(const recdb::file_t& file) const {
 void active_mpm_t::delete_old_data(db_txn& parent_txn, system_time_t now) {
 	/*
 		remove old data by removing old mpm parts. Removal is done file by file (typically 5 min of mpeg data)
-		The deleted data is the one older than  now - live_buffer_duration, with one exception:
-		only files not currently in use by live viewing, or not newer than those currently in use
+		The deleted data is the one older than  now - live_buffer_duration, with the following exceptions:
+		1.  only files not currently in use by live viewing, or not newer than those currently in use
 		by live viewing should be removed. Otherwise we may be viewing an old part of the live buffer and
 		when a newer part is then reached, it may no longer exist and we have a gap in playback
+		2. we do not delete old data when recordings are in progress. These
 
 	*/
 	using namespace recdb;
@@ -1112,11 +1045,11 @@ void active_mpm_t::delete_old_data(db_txn& parent_txn, system_time_t now) {
 		auto delta = now - system_clock_t::from_time_t(e);
 		if (system_clock_t::to_time_t(now) > e && delta > timeshift_duration) {
 			ss::string<128> filename;
-			filename.sprintf("%s/%s", dirname.c_str(), file.filename.c_str());
+			filename.format("{:s}/{:s}", dirname.c_str(), file.filename.c_str());
 			auto playing_fileno = meta_marker.readAccess()->playback_clients_newest_fileno();
 			if ((int)file.fileno < playing_fileno) {
 				if (!file_used_by_recording(file)) {
-					dtdebugx("REMOVE TIMESHIFT FILE %d: %s age=%lds\n", file.fileno, filename.c_str(),
+					dtdebugf("REMOVE TIMESHIFT FILE {:d}: {:s} age={:d}", file.fileno, filename.c_str(),
 									 std::chrono::duration_cast<std::chrono::seconds>(delta).count());
 					std::filesystem::remove(std::filesystem::path(filename.c_str()));
 					new_data_stream_time_start = std::max(new_data_stream_time_start, file.stream_time_end);
@@ -1125,26 +1058,17 @@ void active_mpm_t::delete_old_data(db_txn& parent_txn, system_time_t now) {
 				break; // done
 
 			} else {
-				dtdebugx("POSTPONE REMOVE TIMESHIFT FILE %d (%d still playing back): %s age=%lds\n", file.fileno,
+				dtdebugf("POSTPONE REMOVE TIMESHIFT FILE {:d} ({:d} still playing back): {:s} age={:d}s", file.fileno,
 								 playing_fileno, filename.c_str(), std::chrono::duration_cast<std::chrono::seconds>(delta).count());
 				new_data_start_time =
 					system_clock_t::from_time_t(std::min(file.real_time_start, system_clock_t::to_time_t(new_data_start_time)));
 			}
 		} else {
-			dtdebugx("KEEP TIMESHIFT FILE %d: %s\n", file.fileno, file.filename.c_str());
+			dtdebugf("KEEP TIMESHIFT FILE {:d}: {:s}\n", file.fileno, file.filename.c_str());
 			break;
 		}
 	}
 	auto mm = meta_marker.writeAccess();
 	mm->livebuffer_start_time = std::max(new_data_start_time, mm->livebuffer_start_time);
 	mm->livebuffer_stream_time_start = std::max(new_data_stream_time_start, mm->livebuffer_stream_time_start);
-}
-
-void active_mpm_t::update_epg_if_needed(meta_marker_t* mm) {
-	if (now > last_epg_check_time +10s &&  mm->need_epg_update(now)) {
-		//dtdebugx("Updating epg for live service");
-		active_service->update_epg(now, mm);
-		last_epg_check_time = now;
-
-	}
 }

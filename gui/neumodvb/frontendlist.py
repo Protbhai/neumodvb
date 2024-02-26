@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-# Neumo dvb (C) 2019-2023 deeptho@gmail.com
+# Neumo dvb (C) 2019-2024 deeptho@gmail.com
 # Copyright notice:
 #
 # This program is free software; you can redistribute it and/or modify
@@ -46,20 +46,65 @@ def rf_inputs_fn(x):
     return " ".join(str(v) for v in x[1])
 
 def subscription_fn(x):
-    sub = x[0].sub
-    if sub.mux_key.sat_pos == pychdb.sat.sat_pos_none:
+    fesub = x[0].sub
+    subs = fesub.subs
+    mux_key = fesub.mux_key
+    if len(subs) == 0:
         return ""
-    sid = f" {sub.mux_key.mux_id}" if (sub.mux_key.stream_id < 0)  else f'-{sub.mux_key.stream_id} {sub.mux_key.mux_id}'
-    if sub.mux_key.sat_pos not in (pychdb.sat.sat_pos_dvbc, pychdb.sat.sat_pos_dvbt):
-        sat_pos=pychdb.sat_pos_str(sub.mux_key.sat_pos)
-        t= lastdot(sub.rf_path.lnb.lnb_type)
-        e = neumodbutils.enum_to_str
-        f = f'{e(sub.band)}{e(sub.pol)}' if sub.frequency == 0 else f'{sub.frequency/1000.:9.3f}{e(sub.pol)}{sid}'
-        return f'#{sub.rf_path.rf_input} {sat_pos:>5}{t} {f} {sub.rf_path.lnb.lnb_id}'
-    else:
-            f = f'{e(sub.band)}{e(sub.pol)}' if sub.frequency == 0 else f'{sub.frequency/1000.:9.3f}{sid}'
-            return f'#{sub.rf_path.rf_input} {f}'
+    ret=[]
 
+    #lnb and rf input info common to all subscriptions
+    sid = f"" if (mux_key.stream_id < 0) else f'-{mux_key.stream_id}'
+    if mux_key.sat_pos == pychdb.sat.sat_pos_none:
+        if fesub.sat_pos == pychdb.sat.sat_pos_none:
+            ret.append(f"Exclusive")
+        elif fesub.sat_pos not in (pychdb.sat.sat_pos_dvbc, pychdb.sat.sat_pos_dvbt):
+            t= lastdot(fesub.rf_path.lnb.lnb_type)
+            sat_pos=pychdb.sat_pos_str(fesub.sat_pos)
+            t= lastdot(fesub.rf_path.lnb.lnb_type)
+            e = neumodbutils.enum_to_str
+            f = f'{sat_pos} {e(fesub.band)}-{e(fesub.pol)}'
+            m = f'{f} #{fesub.rf_path.rf_input} {t}:{fesub.rf_path.lnb.lnb_id}'
+            ret.append(m)
+        else:
+            f = f'{fesub.frequency/1000.:9.3f}Mhz{sid}'
+            m = f'{f} #{fesub.rf_path.rf_input}'
+            ret.append(m)
+    elif mux_key.sat_pos not in (pychdb.sat.sat_pos_dvbc, pychdb.sat.sat_pos_dvbt):
+        t= lastdot(fesub.rf_path.lnb.lnb_type)
+        sat_pos=pychdb.sat_pos_str(mux_key.sat_pos)
+        t= lastdot(fesub.rf_path.lnb.lnb_type)
+        e = neumodbutils.enum_to_str
+        f = f'{sat_pos} {fesub.frequency/1000.:9.3f}{e(fesub.pol)}{sid}'
+        m = f'{f} #{fesub.rf_path.rf_input} {t}:{fesub.rf_path.lnb.lnb_id}'
+        ret.append(m)
+    else:
+        f = f'{fesub.frequency/1000.:9.3f}Mhz{sid}'
+        m = f'{f} #{fesub.rf_path.rf_input}'
+        ret.append(m)
+
+    for sub in subs:
+        if sub.has_service:
+            assert type(sub.v) == pychdb.service.service
+            #srv = ' '.join(str(sub.service).split(' ')[1:])
+            srv=f'{sub.v.k.service_id} [{sub.v.ch_order}] {sub.v.name}'
+            ret.append(f'{sub.subscription_id}: {srv}')
+        elif sub.has_mux:
+            assert type(sub.v) == pychdb.service.service #not a mistake
+            ret.append(f'{sub.subscription_id}: {str(sub.v.k.mux)}')
+        else:
+            assert type(sub.v) == pychdb.band_scan.band_scan
+            usals_pos = fesub.usals_pos
+            if usals_pos not in (pychdb.sat.sat_pos_dvbc, pychdb.sat.sat_pos_dvbt):
+                sat_pos=pychdb.sat_pos_str(usals_pos)
+                t= lastdot(fesub.rf_path.lnb.lnb_type)
+                e = neumodbutils.enum_to_str
+                f = f'{e(fesub.band)}-{e(fesub.pol)}'
+                ret.append(f'{sub.subscription_id}: {f}')
+            else:
+                f = f'Exclusive'
+                ret.append(f'{sub.subscription_id}: {f}')
+    return '\n'.join(ret)
 
 class FrontendTable(NeumoTable):
     CD = NeumoTable.CD
@@ -83,8 +128,8 @@ class FrontendTable(NeumoTable):
             example=" DVB T+C "),
          CD(key='priority',  label='priority', basic=True),
          CD(key='sub.rf_path.card_mac_address',  label='subscription', basic=True, dfn=subscription_fn,
-            readonly=True, example='#0 28.2EKu 10714.250H-255 1234'),
-         CD(key='sub.use_count',  label='fe use\ncount', basic=True, readonly=True),
+            readonly=True, example='#0 10714.250H-255 BBC One London '),
+         #CD(key='sub.subs',  label='fe use\ncount', basic=True, readonly=True, cfn=None, dfn= lambda x : len(x[1]) ),
          CD(key='rf_inputs',  label='rf\ninputs', basic=True, dfn=rf_inputs_fn, readonly=True, example='1 '*6),
          #CD(key='rf_in',  label='RF#', basic=True, readonly=True),
          CD(key='card_mac_address',  label='CARD MAC', basic=True, no_combo=True, readonly=True,
@@ -109,7 +154,7 @@ class FrontendTable(NeumoTable):
                          screen_getter = screen_getter,
                          record_t=pydevdb.fe.fe, initial_sorted_column = initial_sorted_column,
                          **kwds)
-
+        self.do_autosize_rows = True
     def screen_getter_xxx(self, txn, sort_field):
         match_data, matchers = self.get_filter_()
         screen = pydevdb.fe.screen(txn, sort_order=sort_field,
@@ -127,7 +172,7 @@ class FrontendTable(NeumoTable):
 
     def enable_cfn(self):
         """
-        Present a menu of which delsys can be abled
+        Present a menu of which delsys can be enabled
         """
         rec = self.CurrentlySelectedRecord()
         d = set([pychdb.delsys_to_type(d) for d in rec.delsys])
@@ -187,6 +232,12 @@ class FrontendGridBase(NeumoGridBase):
         super().__init__(basic, readonly, table, *args, **kwds)
         self.sort_order = 0
         self.sort_column = None
+
+    def OnShowHide(self, event):
+        #Ensure that multiline rows are shown fully
+        if event.Show:
+            wx.CallAfter(self.AutoSizeRows)
+        return super().OnShowHide(event)
 
     def CmdTune(self, evt):
         row = self.GetGridCursorRow()

@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -88,7 +88,7 @@ namespace dtdemux {
 			for(;;) {
 				if(need_data()) {
 					assert(current_range.available()==0);
-					//dtdebug("READ: pid=NULL");
+					//dtdebugf("READ: pid=NULL");
 					return NULL;
 				}
 
@@ -98,7 +98,7 @@ namespace dtdemux {
 				global_ts_packet = ts_packet_t(range);
 				assert(global_ts_packet.range.available() == global_ts_packet.range.tst);
 
-				//dtdebugx("READ: pid=%d cc=%d", global_ts_packet.get_pid(), global_ts_packet.get_continuity_counter());
+				//dtdebugf("READ: pid={:d} cc={:d}", global_ts_packet.get_pid(), global_ts_packet.get_continuity_counter());
 				if(global_ts_packet.range.is_valid())
 					return &global_ts_packet;
 			}
@@ -122,7 +122,7 @@ namespace dtdemux {
 			}
 
 			if(!need_data()) {
-				dterror("set_range can only be called after current range was fully processed");
+				dterrorf("set_range can only be called after current range was fully processed");
 				assert(0);
 				return;
 			}
@@ -145,12 +145,12 @@ namespace dtdemux {
 
 
 		template<typename parser_t, typename... Args>
-		inline auto register_pid(int pid, Args... args) {
+		inline auto register_pid(int pid, const ss::string_& ndc_prefix, Args... args) {
 			auto parser=std::make_shared<parser_t>(*this, pid, args...);
-			ss::string<16> prefix(log4cxx::NDC::peek().c_str());
-			register_parser(pid, [parser, pid, prefix](ts_packet_t* p){
-				ss::string<32> ndc;
-				ndc.sprintf("%s PID(0x%x)", prefix.c_str(), pid);
+			ss::string<128> ndc;
+			ndc.format("{:s} PID(0x{:x})", ndc_prefix, pid);
+			register_parser(pid, [parser, pid, ndc](ts_packet_t* p){
+				log4cxx::NDC::clear();
 				log4cxx::NDC::push(ndc.c_str());
 				parser->parse(p);});
 			return parser;

@@ -6,27 +6,35 @@ and simpler cards based on stv091x like tbs5927, on tas2101 like tbs5990 and on 
 Some of the features include
 
  * spectral analysis of satellite bands
- * blindscan (TBS-6909x, TBS-6903x, tbs5927, and incomplete support for tbs5990)
+ * blindscan (TBS-6909x, TBS-6903x, tbs5927, m88rs6060, and incomplete support for tbs5990)
  * scanning muxes
+ * scanning satellite bands by blind tuning
  * viewing and recording programs
  * epg scanning, including SkyUk, Freesat, Movistar, Viasat Nordic
  * watching encrypted streams using oscam
  * tuning to multi-stream and T2MI streams
  * controlling positioners
-Currently this software is fully functional, but is of alpha quality. It has seen
-very little testing.
+ * IQ constellation samples (on most cards)
 
-**Important** The database schema has changed in a non-backwards compatible way in neumoDVB 1.0.
-As a result, all LNB definitions will be lost and need to be re-entered. Moreover the details of
-this have changed. Read the documentation. Other parts of the database are not affected, because
-neumoDVB in general upgrades older information to the newer database schema. However, the changes
-to LNBs are too large.
+To install and use neumoDVB, please read the instructions below. Many users don't bother and
+then start wasting other people's time by asking questions answered in the documentation. Needless
+to say, this demotivates developers.
+
+neumoDVB cna be installed in two different ways
+
+* Compile it yourself. This enables easy upgrading when bugs are fixed, but requires
+  some basic knowledge on compiling. A good starting point is to read the instructions
+  before trying random things and then expecting users of fora to fix the problems.
+
+* On supported distributions (currently: fedora 39) and architectures (currently: x86_64
+
+
 
 ## [Changes](docs/changes.md) ##
 
+## [Compilation/Installation from github](docs/INSTALL.md) ##
 
-
-## [Installation](docs/INSTALL.md) ##
+## [Installation from debian and rpm packages](docs/packages.md) ##
 
 ## [Troubleshooting](docs/troubleshooting.md) ##
 
@@ -105,11 +113,17 @@ will bring back the GUI. Pressing `Ctrl-F` will enter full screen mode
 
 ## Other Documentation ##
 
+### [Changing options](docs/options.md) ###
+
 ### [Frontend configuration](docs/frontends.md) ###
 
 ### [LNB configuration](docs/lnbs.md) ###
 
 ### [Scanning muxes](docs/muxes.md) ####
+
+### [Scanning satellite bands](docs/satellites.md) ####
+
+### [Automating scanning](docs/commands.md) ###
 
 ### [Managing channels](docs/channel_management.md) ###
 
@@ -117,13 +131,19 @@ will bring back the GUI. Pressing `Ctrl-F` will enter full screen mode
 
 ### [Viewing and recording TV](docs/viewing.md) ###
 
+### [Streaming services and muxes](docs/streaming.md) ###
+
 ### [Spectrum analysis](docs/spectrum.md) ###
 
 ### [Positioner control](docs/positioner.md) ###
 
+### [Dish list](docs/dishes.md) ####
+
 ### [Signal history](docs/signal_history.md) ###
 
 ### [Filtering lists](docs/lists.md) ###
+
+### [Using external programs with neumoDVB](docs/external.md) ###
 
 
 ### [GUI Design in neumoDVB](docs/gui_design.md) ###

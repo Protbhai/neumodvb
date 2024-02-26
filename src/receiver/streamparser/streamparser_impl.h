@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -28,19 +28,18 @@ namespace dtdemux {
 	struct ts_packet_t;
 };
 
-
+__attribute__((optnone)) //Without this  the code will crash!
 inline dtdemux::ts_packet_t* do_transfer(continuation_t& from, continuation_t& to,
 																				 dtdemux::ts_packet_t*  parameter)
 {
 	/*The address of from needs to be stored in a global variable,
 		because the stack will be replaced*/
-	static thread_local continuation_t* store_at_{};
-	static thread_local dtdemux::ts_packet_t*  parameter_{};
+	static thread_local continuation_t * store_at_{};
+	static thread_local dtdemux::ts_packet_t* parameter_{};
 	store_at_ = &from;
 	parameter_ = parameter;
 	assert (to);
 	*store_at_ = to.resume();
-	assert(*store_at_);
 	//at this point, store_at is no longer needed!
 	return parameter_;
 }
@@ -175,7 +174,7 @@ namespace dtdemux {
 			p= static_cast<implementation_t*>(this)->read_packet();
 			assert(!p || p->range.available() == p->range.tst);
 			if (p==NULL) {
-				//printf("parser[%d] end of stream\n", parser_pid);
+				//printf("parser[{:d}] end of stream\n", parser_pid);
 				assert(self);
 				p = call_fiber(root, p);
 				assert(!p || p->range.available() == p->range.tst);
@@ -186,11 +185,11 @@ namespace dtdemux {
 		}
 		assert(!p || p->range.available() == p->range.tst);
 
-		//printf("parser[%d] reading packet pid=%d seqno=%d\n", pid, p[0], p[1]);
+		//printf("parser[{:d}] reading packet pid={:d} seqno={:d}\n", pid, p[0], p[1]);
 		int packet_pid = p->get_pid();
 		if (parser_pid == packet_pid) {
 			//printf("returning directly\n");
-			//dtdebugx("READx: pid=%d cc=%d", global_ts_packet.get_pid(), global_ts_packet.get_continuity_counter());
+			//dtdebugf("READx: pid={:d} cc={:d}", global_ts_packet.get_pid(), global_ts_packet.get_continuity_counter());
 			return p;
 		}
 		assert(!p || p->range.available() == p->range.tst);
@@ -233,7 +232,7 @@ namespace dtdemux {
 #ifndef NDEBUG
 		auto it = fibers.find(dvb_pid_t(parser_pid));
 		if (it != fibers.end()) {
-			dterrorx("Cannot add multiple parsers for pid %d", parser_pid);
+			dterrorf("Cannot add multiple parsers for pid {:d}", parser_pid);
 			assert(0);
 			return;
 		}
@@ -243,9 +242,10 @@ namespace dtdemux {
 			//return to root at startup and do nothing
 			dtdemux::ts_packet_t* in = do_transfer(self, invoker, nullptr);
 			//start processing many packets; fn will only return when fuly done
+			assert(in);
 			fn(in);
 			fibers.erase(dvb_pid_t(parser_pid));
-			//printf("returning root pid=%d\n", in[0]);
+			//printf("returning root pid={:d}\n", in[0]);
 			/*
 				If we ever end, we transfer control to the very first caller.
 				*/
@@ -253,7 +253,6 @@ namespace dtdemux {
 		};
 		self = boost::context::callcc(f);
 		assert(self);
-
 	}
 
 	template<typename implementation_t>
@@ -290,10 +289,8 @@ namespace dtdemux {
 				if(!p)
 					break;
 				else {
-					//printf("skipping pid=%d seq=%d\n", p[0], p[1]);
 				}
 			} else {
-				//printf("skipping pid=%d seq=%d\n", packet_pid, p[1]);
 			}
 		}
 	}
@@ -301,7 +298,6 @@ namespace dtdemux {
 	template<typename implementation_t>
 	int stream_parser_base_t<implementation_t>::exit()
 	{
-		log4cxx::NDC::pop();
 		fibers.clear();
 		return 0;
 	}

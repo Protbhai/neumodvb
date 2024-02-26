@@ -1,4 +1,3 @@
-*.spec
 *.workspace
 *.project
 cscope.files
@@ -11,6 +10,7 @@ cscope.files
 .pdb-pyhist
 /build/
 /build_ext/
+/build_fmt/
 /x86_64/
 \#*\#
 \.#*
@@ -21,4 +21,5 @@ cscope.out
 pybind11/tests/
 /build/*
 /unused/*
-.idea
+.idea/
+gui/.idea/

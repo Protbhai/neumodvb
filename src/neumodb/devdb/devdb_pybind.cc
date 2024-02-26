@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -20,6 +20,7 @@
  */
 #include "devdb_vector_pybind.h"
 #include "neumodb/devdb/devdb_extra.h"
+#include "devdb_private.h"
 #include "stackstring/stackstring_pybind.h"
 #include "util/identification.h"
 #include <pybind11/pybind11.h>
@@ -41,27 +42,35 @@ static inline devdb::lnb_connection_t* conn_helper
 	return connection_for_rf_path(lnb, rf_path);
 }
 
+static void export_dish_extra(py::module& m) {
+	//auto mm = py::reinterpret_borrow<py::module>(m.attr("dish"));
+	auto mm = m.def_submodule("dish");
+	using namespace devdb;
+	mm.def("list_dishes", &dish::list_dishes,
+				 "Returns a list of known dish ids",
+				 py::arg("devdb_rtxn"))
+		;
+}
+
 static void export_lnb_extra(py::module& m) {
 	auto mm = py::reinterpret_borrow<py::module>(m.attr("lnb"));
 	using namespace devdb;
-	mm.def("update_lnb_from_positioner", &lnb::update_lnb_from_positioner, "save changed lnb"
-				 , py::arg("wtxn"), py::arg("lnb"), py::arg("usals_location")
-				 , py::arg("current_sat_pos")=sat_pos_none
-				 , py::arg("current_conn")= nullptr
-				 ,py::arg("save")=true)
+	mm.def("update_lnb_network_from_positioner", &lnb::update_lnb_network_from_positioner,
+				 "save changed lnb network"
+				 , py::arg("wtxn"), py::arg("lnb"), py::arg("current_sat_pos"))
+		.def("update_lnb_connection_from_positioner", &lnb::update_lnb_connection_from_positioner,
+				 "save changed lnb connection"
+				 , py::arg("wtxn"), py::arg("lnb"), py::arg("connection"))
 		.def("update_lnb_from_lnblist", &lnb::update_lnb_from_lnblist, "save changed lnb",
 				 py::arg("wtxn"), py::arg("lnb"), py::arg("save")=true)
 		.def("can_move_dish", &lnb::can_move_dish,
 				 "Returns true if this lnb connection can move the dish",
 				 py::arg("lnb_connection"))
-		.def("on_positioner", &lnb::on_positioner,
-				 "Returns true if this lnb is on a positioner",
-				 py::arg("lnb"))
 		.def("reset_lof_offset", &lnb::reset_lof_offset,
 				 "reset the LOF offset to 0",
 				 py::arg("devdb_wtxn"),
 				 py::arg("lnb"))
-		.def("make_unique_if_template", make_unique_if_template,
+		.def("make_unique_if_template", lnb::make_unique_if_template,
 				 "Make the key of this lnb unique, but only if lnb.k.id<0")
 		.def("select_lnb", &lnb::select_lnb, "Select an lnb; which can tune to sat or mux",
 				 py::arg("devdb_rtxn"), py::arg("sat").none(true) = nullptr, py::arg("mux").none(true) = nullptr)
@@ -85,14 +94,36 @@ static void export_lnb_extra(py::module& m) {
 				 py::arg("rtxn"), py::arg("lnb"), py::arg("lnb_connection"))
 		.def("lnb_frequency_range", &lnb::lnb_frequency_range,
 				 "Obtain min/mid/max frequency for this lnb",  py::arg("lnb"))
-#if 0
-		.def("current_sat_pos", &devdb::lnb::current_sat_pos,
-				 "Obtain the direction in which the lnb currently points",
-				 py::arg("lnb"), py::arg("usals_location"))
-#endif
+		.def("sat_band", &lnb::sat_band,
+				 "Obtain sat_band for this lnb",  py::arg("lnb"))
 		;
 }
 
+void export_subscribe_options(py::module& m) {
+	py::class_<subscription_options_t, tune_options_t>(m, "subscription_options_t")
+		.def(py::init<>( []() { subscription_options_t ret; ret.scan_target = scan_target_t::SCAN_FULL; return ret;}),
+				 "Tune Options for neumodvb")
+		.def_readwrite("spectrum_scan_options", &subscription_options_t::spectrum_scan_options)
+		//.def_readwrite("subscription_type", &subscription_options_t::subscription_type)
+		;
+
+}
+
+static void export_scan_command_extra(py::module& m) {
+	auto mm = py::reinterpret_borrow<py::module>(m.attr("scan_command"));
+	using namespace devdb;
+	mm.def("make_unique_if_template", scan_command::make_unique_if_template,
+				 "Make the key of this scan_command unique, but only if id<0")
+		;
+}
+
+static void export_stream_extra(py::module& m) {
+	auto mm = py::reinterpret_borrow<py::module>(m.attr("stream"));
+	using namespace devdb;
+	mm.def("make_unique_if_template", stream::make_unique_if_template,
+				 "Make the key of this stream_t unique, but only if id<0")
+		;
+}
 
 static std::tuple<bool, std::optional<std::string>>
 lnb_can_tune_to_mux_helper(const devdb::lnb_t& lnb, const chdb::dvbs_mux_t& mux, bool disregard_networks) {
@@ -116,7 +147,7 @@ PYBIND11_MODULE(pydevdb, m) {
     )pbdoc";
 
 	using namespace chdb;
-	export_ss_vector(m, fe_band_pol_t);
+	export_ss_vector(m, subscription_data_t);
 
 	m.def("lnb_can_tune_to_mux", &lnb_can_tune_to_mux_helper,
 				 "check if lnb can tune to mux; returns true/false and optional error string", py::arg("lnb"), py::arg("mux"),
@@ -128,6 +159,9 @@ PYBIND11_MODULE(pydevdb, m) {
 	devdb::export_enums(m);
 	devdb::export_structs(m);
 	export_lnb_extra(m);
-
+	export_scan_command_extra(m);
+	export_stream_extra(m);
+	export_dish_extra(m);
+	export_subscribe_options(m);
 	m.attr("__version__") = version_info();
 }

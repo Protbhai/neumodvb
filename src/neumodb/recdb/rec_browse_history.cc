@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -20,8 +20,6 @@
  */
 #include "util/dtassert.h"
 #include "neumodb/recdb/recdb_extra.h"
-#include "stackstring/ssaccu.h"
-#include "xformat/ioformat.h"
 #include <iomanip>
 #include <iostream>
 

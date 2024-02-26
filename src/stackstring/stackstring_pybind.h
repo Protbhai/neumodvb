@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -54,6 +54,8 @@ inline void export_ss_vector_(py::module &m, const char* pytypename)
 		.def("erase", [](ss::vector_<T> &v, size_t idx) {
 											//printf("[%p] len\n", &v);
 										 v.erase(idx); })
+		.def("index", [](ss::vector_<T> &v, const T& val) {
+										 return v.index_of(val); })
 		.def("resize", [](ss::vector_<T> &v, size_t size) {
 											//printf("[%p] len\n", &v);
 										 v.resize(size); })
@@ -61,35 +63,32 @@ inline void export_ss_vector_(py::module &m, const char* pytypename)
                 		 v.resize_no_init(v.size()+1);
 										 new(&v[v.size()-1]) T(val);
 		})
-#if 0
-		.def("address", [](ss::vector_<T> &v) {
-											return v.address();
-										})
-#endif
+		//.def("assign", py::overload_cast<const py::list&>(&assign_from_list))
+		.def("assign", [](ss::vector_<T>& v, py::list l) {
+			v.clear();
+			for(auto p: l) {
+				if constexpr (!pybind11::detail::cast_is_temporary_value_reference<T>::value) {
+					auto pv =  p.cast<T>();
+					v.push_back(pv);
+				} else {
+					auto pv =  p.cast<T&>();
+					v.push_back(pv);
+				}
+			}})
 		.def("__iter__", [](ss::vector_<T> &v) {
 				//printf("[%p] iter\n", &v);
          return py::make_iterator(v.buffer(), v.buffer()+v.size());
 			}
-#if 1
 			,py::keep_alive<0, 1>() /* Essential: keep object alive while iterator exists */
-#endif
 			)
 		.def("__getitem__", [](ss::vector_<T> &v, int i) -> T& {
 				if(i>=(signed)v.size())
 					throw py::index_error();
 				//if (i==5)
-				//	printf("[%p] get [%d]\n", &v, i);
+				//	printf("[%p] get [{:d}]\n", &v, i);
 				return v[i];
 		}
-#if 0
-			,
-			py::keep_alive<0, 1>() /* Essential: keep object alive while iterator exists */
-#endif
-#if 0
-			,py::return_value_policy::reference
-#else
 			,py::return_value_policy::copy
-#endif
 			)
 #ifdef TODO
 		//TODO: this returns copies instead of a real slice
@@ -102,11 +101,10 @@ inline void export_ss_vector_(py::module &m, const char* pytypename)
 				for (size_t i = 0; i < slicelength; ++i) {
 					(*ret)[i] = v[start]; start += step;
 				}
-				//printf("[%p] slice [%ld-%ld]\n", &v, start,stop);
 				return ret; })
 #endif
 		.def("__setitem__", [](ss::vector_<T> &v, int i, const T& val) {
-				//printf("[%p] set [%d]\n", &v, i);
+				//printf("[%p] set [{:d}]\n", &v, i);
 													v[i]=val; }
 			)
 
@@ -114,7 +112,6 @@ inline void export_ss_vector_(py::module &m, const char* pytypename)
             size_t start, stop, step, slicelength;
             if (!slice.compute(s.size(), &start, &stop, &step, &slicelength))
                 throw py::error_already_set();
-						//printf("[%p] set list[%ld] %ld\n", &s, py::len(list), slicelength);
             if (slicelength != py::len(list))
                 throw std::runtime_error("Left and right hand size of slice assignment have different sizes!");
 						for (auto& v: list) {

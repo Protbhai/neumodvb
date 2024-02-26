@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -24,6 +24,7 @@
 #include "neumodb/cursors.h"
 #include "neumodb/dbdesc.h"
 #include "neumodb/schema/schema_db.h"
+#include <uuid/uuid.h>
 
 
 namespace {{dbname}} {
@@ -62,6 +63,9 @@ namespace {{dbname}} {
 	{
 		schema::neumo_schema_t s;
 		s.version = neumo_schema_version;
+		uuid_t uuid;
+		uuid_generate(uuid);
+		s.uuid.append_raw(&uuid[0], sizeof(uuid));
 		s.db_type="{{dbname}}";
 		for(auto& schema_entry: *dbdesc->p_all_sw_schemas) {
 			convert_schema(*schema_entry.pschema, s.schema);
@@ -112,7 +116,7 @@ namespace {{dbname}} {
 			update_log<{{struct.class_name}}>(tcursor.txn, primary_key, update_type);
 			return new_record;
 		}
-
+		{%if false %}
 	 template<>
 		 void put_record_at_key<{{struct.class_name}}>
 		 (db_tcursor<{{struct.class_name}}>& tcursor, const ss::bytebuffer_& primary_key, const {{struct.class_name}}& record)
@@ -120,6 +124,21 @@ namespace {{dbname}} {
 			 assert(!tcursor.is_index_cursor);
 			 update_secondary_keys<{{struct.class_name}}>(tcursor, primary_key, record);
 			 tcursor.put_kv(primary_key, record);
+			 auto update_type = db_txn::update_type_t::updated;
+			 update_log<{{struct.class_name}}>(tcursor.txn, primary_key, update_type);
+		 }
+		 {% endif %}
+		 /*
+			 update record at cursor assuming its primary key was not changed
+			*/
+	 template<>
+		 void update_record_at_cursor<{{struct.class_name}}>
+		 (db_tcursor<{{struct.class_name}}>& tcursor, const {{struct.class_name}}& record)
+		 {
+			 assert(!tcursor.is_index_cursor);
+			 auto primary_key = tcursor.current_serialized_primary_key();
+			 update_secondary_keys<{{struct.class_name}}>(tcursor, primary_key, record);
+			 tcursor.put_kv_at_cursor(record);
 			 auto update_type = db_txn::update_type_t::updated;
 			 update_log<{{struct.class_name}}>(tcursor.txn, primary_key, update_type);
 		 }

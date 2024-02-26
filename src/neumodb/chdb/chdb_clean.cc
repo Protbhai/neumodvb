@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -22,8 +22,6 @@
 #include "neumodb/chdb/chdb_extra.h"
 #include "neumodb/devdb/devdb_extra.h"
 #include "receiver/neumofrontend.h"
-#include "stackstring/ssaccu.h"
-//#include "xformat/ioformat.h"
 #include "util/template_util.h"
 #include <signal.h>
 #include <iomanip>
@@ -34,31 +32,89 @@ using namespace chdb;
 
 
 namespace chdb {
-	template<typename mux_t> static void clean(db_txn& wtxn);
+	static void clean_sats(db_txn& wtxn);
+	template<typename mux_t> static void clean_muxes(db_txn& wtxn);
 	template<typename record_t> static void clean_expired(db_txn& wtxn, std::chrono::seconds age, const char* label);
+#if 0
 	static void clean_overlapping_muxes(db_txn& wtn, const chdb::dvbs_mux_t& mux, int sat_pos);
 	void clean_overlapping_muxes(db_txn& wtn, const chdb::dvbs_mux_t& mux);
+#endif
 };
 
-template<typename mux_t> static void chdb::clean(db_txn& wtxn) {
+static void chdb::clean_sats(db_txn& wtxn) {
 	using namespace chdb;
 	int count{0};
 
+	auto c = find_first<sat_t>(wtxn);
+
+	auto clean1 = [&](scan_status_t& scan_status, scan_id_t& scan_id) {
+		switch(scan_status) {
+		case scan_status_t::PENDING:
+		case scan_status_t::ACTIVE:
+		case scan_status_t::RETRY:
+			scan_status = scan_status_t::IDLE;
+			scan_id = {};
+			return true;
+			break;
+		default:
+			return false;
+		}
+	};
+
+	auto clean = [&](band_scan_t& band_scan) {
+		if(chdb::scan_in_progress(band_scan.scan_id)) {
+			auto owner_pid = band_scan.scan_id.pid;
+			if(kill((pid_t)owner_pid, 0) == 0) {
+				dtdebugf("process pid={:d} is still active; skip deleting scan status", owner_pid);
+				return false;
+				}
+			band_scan.scan_id = {};
+		}
+
+		bool changed{false};
+		changed |= clean1(band_scan.scan_status, band_scan.scan_id);
+		return changed;
+	};
+
+	for(auto sat: c.range())  {
+		//we no longer store dvbc and dvbt as fake sats
+		if(sat.sat_pos == sat_pos_dvbc || sat.sat_pos == sat_pos_dvbt) {
+			delete_record_at_cursor(c);
+			continue;
+		}
+		bool changed{false};
+		for(auto & band_scan: sat.band_scans) {
+			changed  |= clean(band_scan);
+		}
+		if(changed) {
+			sat.mtime = system_clock_t::to_time_t(now);
+			put_record(wtxn, sat);
+			count++;
+		}
+	}
+	dtdebugf("Cleaned {:d} sats with PENDING/ACTIVE/RETRY status", count);
+}
+
+template<typename mux_t> static void chdb::clean_muxes(db_txn& wtxn) {
+	using namespace chdb;
+	int count{0};
+#ifdef TODO
 	auto clean = [&](scan_status_t scan_status) {
 		auto c = mux_t::find_by_scan_status(wtxn, scan_status, find_type_t::find_geq,
 																				mux_t::partial_keys_t::scan_status);
 
 		for(auto mux: c.range())  {
 			assert (mux.c.scan_status == scan_status);
-			if(mux.c.scan_id != 0) {
-				auto owner_pid = mux.c.scan_id >>8;
+			if(mux.c.scan_id != scan_id_t{}) {
+				auto owner_pid = mux.c.scan_id.pid;
 				if(kill((pid_t)owner_pid, 0) == 0) {
-					dtdebugx("process pid=%d is still active; skip deleting scan status\n", owner_pid);
+					dtdebugf("process pid={:d} is still active; skip deleting scan status", owner_pid);
 				continue;
 				}
 			}
 			mux.c.scan_status = chdb::scan_status_t::IDLE;
-			mux.c.scan_id = 0;
+			mux.c.scan_id = {};
+			mux.c.scan_rf_path = {};
 			put_record(wtxn, mux);
 			count++;
 		}
@@ -68,8 +124,35 @@ template<typename mux_t> static void chdb::clean(db_txn& wtxn) {
 	clean(scan_status_t::PENDING);
 	clean(scan_status_t::ACTIVE);
 	clean(scan_status_t::RETRY);
+#else
+	auto c = chdb::find_first<mux_t>(wtxn);
+	for(auto mux: c.range())  {
+		bool need_clean = (mux.c.scan_status == scan_status_t::PENDING ||
+											 mux.c.scan_status == scan_status_t::ACTIVE ||
+											 mux.c.scan_status == scan_status_t::RETRY);
+		if(!need_clean) {
+			if (mux.c.scan_id != scan_id_t{}) {
+				need_clean = true; //should not happen, except due to bugs
+			}
+		}
 
-	dtdebugx("Cleaned %d muxes with PENDING/ACTIVE/RETRY status", count);
+		if(mux.c.scan_id != scan_id_t{}) {
+			auto owner_pid = mux.c.scan_id.pid;
+				if(kill((pid_t)owner_pid, 0) == 0) {
+					dtdebugf("process pid={:d} is still active; skip deleting scan status", owner_pid);
+				continue;
+				}
+			}
+			mux.c.scan_status = chdb::scan_status_t::IDLE;
+			mux.c.scan_id = {};
+			mux.c.scan_rf_path = {};
+			put_record(wtxn, mux);
+			count++;
+	}
+
+#endif
+
+	dtdebugf("Cleaned {:d} muxes with PENDING/ACTIVE/RETRY status", count);
 }
 
 template<typename record_t> static void chdb::clean_expired(db_txn& wtxn, std::chrono::seconds age, const char* label)
@@ -91,14 +174,15 @@ template<typename record_t> static void chdb::clean_expired(db_txn& wtxn, std::c
 		delete_record(wtxn, record);
 		count++;
 	}
-	dtdebugx("removed %d expired %s; %d skipped", count, label, skipped);
+	dtdebugf("removed {:d} expired {:s}; {:d} skipped", count, label, skipped);
 }
 
 void chdb::clean_scan_status(db_txn& wtxn)
 {
-	clean<chdb::dvbs_mux_t>(wtxn);
-	clean<chdb::dvbc_mux_t>(wtxn);
-	clean<chdb::dvbt_mux_t>(wtxn);
+	clean_sats(wtxn);
+	clean_muxes<chdb::dvbs_mux_t>(wtxn);
+	clean_muxes<chdb::dvbc_mux_t>(wtxn);
+	clean_muxes<chdb::dvbt_mux_t>(wtxn);
 }
 
 void chdb::clean_expired_services(db_txn& wtxn, std::chrono::seconds age)
@@ -124,7 +208,7 @@ void chdb::clean_chgms_without_services(db_txn& wtxn)
 		}
 	}
 	dttime(10);
-	dtdebugx("%d chgm records deleted\n", count);
+	dtdebugf("{:d} chgm records deleted", count);
 }
 
 /*
@@ -169,6 +253,7 @@ template <typename mux_t> void chdb::clear_all_streams_pending_status(
 				continue;
 		if(mux.c.scan_status == scan_status_t::PENDING && mux.c.scan_id == ref_mux.c.scan_id && mux.k.stream_id>=0) {
 			mux.c.scan_status = scan_status_t::IDLE;
+			mux.c.scan_id = {};
 			mux.c.scan_result = ref_mux.c.scan_result;
 			put_record(chdb_wtxn, mux);
 		}

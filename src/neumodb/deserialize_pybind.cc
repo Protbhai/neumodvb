@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -204,7 +204,7 @@ py::object degraded_export(db_txn& txn) {
 		ss::bytebuffer<32> key;
 		c.get_serialized_key(key);
 		if (key.size() <= (int)sizeof(uint32_t)) {
-			dterror("This key is too short");
+			dterrorf("This key is too short");
 			continue;
 		}
 		uint32_t type_id;

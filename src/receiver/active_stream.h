@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -60,7 +60,7 @@ struct pid_with_use_count_t {
 
 };
 
-struct tune_options_t;
+struct subscription_options_t;
 class active_adapter_t;
 class epoll_tx1;
 
@@ -92,7 +92,6 @@ public:
 			last_data_time = steady_clock_t::now();
 		}
 
-
 	virtual bool is_open() const {
 		return epoll != nullptr;
 	}
@@ -114,7 +113,7 @@ public:
 	}
 
 	virtual chdb::any_mux_t stream_mux() const = 0;
-	const tune_options_t& tune_options() const;
+	const subscription_options_t& tune_options() const;
 
 	virtual inline void on_stream_mux_change(const chdb::any_mux_t& mux) =0;
 	virtual inline void update_received_si_mux(const std::optional<chdb::any_mux_t>& mux, bool is_bad) =0;
@@ -152,7 +151,6 @@ public:
 		return -1;
 	}
 };
-
 
 struct dvb_stream_reader_t final : public stream_reader_t {
 	const ssize_t dmx_buffer_size;
@@ -365,9 +363,9 @@ public:
 		return p.get() ? p->dmx_buffer_size : -1;
 	}
 
-	int get_adapter_no() const; //thread safe because it only accesses constant members
-	int64_t get_adapter_mac_address() const; //thread safe because it only accesses constant members
-	devdb::lnb_key_t get_adapter_lnb_key() const; //thread safe because it only accesses constant members
+	EXPORT int get_adapter_no() const; //thread safe because it only accesses constant members
+	EXPORT int64_t get_adapter_mac_address() const; //thread safe because it only accesses constant members
+	EXPORT devdb::lnb_key_t get_adapter_lnb_key() const; //thread safe because it only accesses constant members
 
 	//void process_psi(int pid, unsigned char* payload, int payload_size);
 	active_stream_t(receiver_t& receiver, const std::shared_ptr<stream_reader_t>& reader)
@@ -379,6 +377,6 @@ public:
 	virtual ~active_stream_t() {
 		if(is_open())
 			close();
-		dtdebug("~active_stream_t\n");
+		dtdebugf("~active_stream_t\n");
 	}
 };

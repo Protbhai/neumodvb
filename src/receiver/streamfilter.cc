@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -33,6 +33,7 @@
 #include <sys/epoll.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <sys/prctl.h>
 
 enum PIPE_FILE_DESCRIPTERS
 {
@@ -55,6 +56,78 @@ bool set_blocking(int fd, bool on) {
 		return false;
 	flags = on ? (flags & ~O_NONBLOCK) : (flags | O_NONBLOCK);
 	return (fcntl(fd, F_SETFL, flags) == 0) ? true : false;
+}
+
+/*
+	start an external command, connect its stdin to stream_fd
+	and connect its stdout to a pipe.
+	Returns the file descriptor of the pipe so that we can read from it
+*/
+std::tuple< int , pid_t>
+start_command(int stream_fd, const char* pathname, ss::vector_<const char*>& args) {
+	pid_t command_pid{pid_t(-1)};
+	int childToParent[2];
+
+	// int status;
+
+	/*  The O_NONBLOCK and FD_CLOEXEC  flags  shall  be
+			clear  on  both  file descriptors
+			fildes[0] = read end
+			fildes[1] = write end
+
+	*/
+
+	if (pipe(childToParent) != 0) {
+		dterrorf("pipe failed\n");
+		::exit(1);
+	}
+
+	switch (command_pid = fork()) {
+	case -1:
+		dterrorf("Fork failed\n");
+		::exit(-1);
+
+	case 0: /* Child */
+		/*rename file descriptors to standard ones so that the external command can read from fd=0
+			and write to fd=1*/
+		if (dup2(stream_fd, STDIN_FILENO) < 0 || dup2(childToParent[WRITE_FD], STDOUT_FILENO) < 0 ||
+				::close(childToParent[READ_FD]) != 0) {
+			dterrorf("error occured");
+			::exit(1);
+		}
+		set_blocking(STDIN_FILENO, true);
+		signal(SIGINT, SIG_IGN); //avoid interrupt by gdb
+		setpgid(0, 0);
+		prctl(PR_SET_PDEATHSIG, SIGHUP); //ask to be killed when parent dies
+		/*     file, arg0, arg1,  arg2 */
+		execvp(pathname,  const_cast<char* const*>(args.buffer()));
+
+		// note that we cannot use dterror....
+		fprintf(stderr, "This line should never be reached!!!\n");
+		::exit(-1);
+
+	default: /* Parent */
+		dtdebugf("Child process {:d} running...\n", command_pid);
+
+		if (::close(childToParent[WRITE_FD]) != 0) {
+			dterrorf("error closing pipe fd");
+		}
+		set_blocking(childToParent[READ_FD], false);
+
+		auto flags = fcntl(childToParent[READ_FD], F_GETFD);
+		if (flags < 0) {
+			dterrorf("fcntl failed: {}", strerror(errno));
+			return {-1,-1};
+		}
+
+		if (fcntl(childToParent[READ_FD], F_SETFD, flags | FD_CLOEXEC) < 0) {
+			dterrorf("Could not set FD_CLOEXEC: {}", strerror(errno));
+			return {-1, -1};
+		}
+
+		return {childToParent[READ_FD], command_pid};
+	}
+	return {-1, -1};
 }
 
 stream_filter_t::stream_filter_t(active_adapter_t& active_adapter, const chdb::any_mux_t& embedded_mux,
@@ -81,7 +154,7 @@ void stream_filter_t::close() {
 		return;
 	assert(data_fd >= 0);
 	if (::close(data_fd) < 0) {
-		dterrorx("Error in close: %s", strerror(errno));
+		dterrorf("Error in close: {}", strerror(errno));
 	}
 	data_fd = -1;
 	stop();
@@ -90,10 +163,10 @@ void stream_filter_t::close() {
 void stream_filter_t::stop() {
 	assert(command_pid > 0);
 	if (kill(command_pid, SIGHUP) < 0) {
-		dterrorx("Errror while sending signal: %s", strerror(errno));
+		dterrorf("Error while sending signal: {}", strerror(errno));
 	}
 	if (waitpid(command_pid, nullptr, 0) < 0) {
-		dterrorx("Errror during wait: %s", strerror(errno));
+		dterrorf("Error during wait: {}", strerror(errno));
 	}
 	command_pid = -1;
 }
@@ -106,7 +179,7 @@ int stream_filter_t::start() {
 #endif
 	ss::string<64> ndc;
 	auto stream_pid = chdb::mux_key_ptr(embedded_mux)->t2mi_pid;
-	ndc.sprintf("PID[%d]", stream_pid);
+	ndc.format("PID[{:d}]", stream_pid);
 	log4cxx::NDC(ndc.c_str());
 	int dmx_buffer_size = 32 * 1024 * 1024;
 	dvb_stream_reader_t dvb_reader(active_adapter, dmx_buffer_size);
@@ -116,26 +189,23 @@ int stream_filter_t::start() {
 
 	auto flags = fcntl(stream_fd, F_GETFD);
 	if (flags < 0) {
-		dterrorx("fcntl failed: %s", strerror(errno));
+		dterrorf("fcntl failed: {}", strerror(errno));
 		return -1;
 	}
 	if (fcntl(stream_fd, F_SETFD, flags & ~FD_CLOEXEC) < 0) {
-		dterrorx("Could not clear FD_CLOEXEC: %s", strerror(errno));
+		dterrorf("Could not clear FD_CLOEXEC: {}", strerror(errno));
 		return -1;
 	}
 	ss::string<32> pid_;
-	pid_.sprintf("%d", stream_pid);
-#if 1
-	data_fd = start_command(stream_fd, "tsp", "--realtime", "--initial-input-packets", "256", "-P", "t2mi", "--pid", pid_.c_str(),
+	pid_.format("{:d}", stream_pid);
+	const char* cmd ="tsp";
+	ss::vector<const char*,16> args = {{cmd,
+			"--realtime", "--initial-input-packets", "256", "-P", "t2mi", "--pid", pid_.c_str(),
 													// @todo: "--plp", plp.cstr()
-													(char*)nullptr);
-#else
-	data_fd = start_command(stream_fd, "/tmp/saver", "saver",
-													// @todo: "--plp", plp.cstr()
-													(char*)nullptr);
-#endif
+			(char*)nullptr}};
+	std::tie(data_fd, command_pid) = start_command(stream_fd, cmd, args);
 	if (data_fd < 0) {
-		dterrorx("Could not start command");
+		dterrorf("Could not start command");
 		return -1;
 	}
 	return 0;
@@ -174,7 +244,7 @@ inline int stream_filter_t::read_external_data() {
 		assert ( write_pointer + size <= buff_size);
 		auto ret = read(data_fd, bufferp.get() + write_pointer, size);
 		if (ret == 0) {
-			dterrorx("end stream closed\n");
+			dterrorf("end stream closed\n");
 			return -1;
 		} else if (ret < 0) {
 			if (errno == EAGAIN) {
@@ -184,7 +254,7 @@ inline int stream_filter_t::read_external_data() {
 			if (errno == EINTR)
 				continue;
 			else {
-				dterrorx("read from command failed: %s\n", strerror(errno));
+				dterrorf("read from command failed: {}", strerror(errno));
 				return -1;
 			}
 		}
@@ -208,72 +278,6 @@ inline int stream_filter_t::read_external_data() {
 	return 0;
 }
 
-/*
-	start an external command, connect its stdin to stream_fd
-	and connect its stdout to a pipe.
-	Returns teh file descriptor of the pipe so that we can read from it
-*/
-template <typename... Args> int stream_filter_t::start_command(int stream_fd, const char* pathname, Args... args) {
-	int childToParent[2];
-
-	// int status;
-
-	/*  The O_NONBLOCK and FD_CLOEXEC  flags  shall  be
-			clear  on  both  file descriptors
-			fildes[0] = read end
-			fildes[1] = write end
-
-	*/
-
-	if (pipe(childToParent) != 0) {
-		dterrorx("pipe failed\n");
-		::exit(1);
-	}
-
-	switch (command_pid = fork()) {
-	case -1:
-		dterrorx("Fork failed\n");
-		::exit(-1);
-
-	case 0: /* Child */
-		/*rename filedesriptors to standard ones so that the external command can read from fd=0
-			and write to fd=1*/
-		if (dup2(stream_fd, STDIN_FILENO) < 0 || dup2(childToParent[WRITE_FD], STDOUT_FILENO) < 0 ||
-				::close(childToParent[READ_FD]) != 0) {
-			dterror("error occured\n");
-			::exit(1);
-		}
-		set_blocking(STDIN_FILENO, true);
-		/*     file, arg0, arg1,  arg2 */
-		execlp(pathname, pathname, args...);
-
-		// note that we cannot use dterror....
-		fprintf(stderr, "This line should never be reached!!!\n");
-		::exit(-1);
-
-	default: /* Parent */
-		dtdebugx("Child process %d running...\n", command_pid);
-
-		if (::close(childToParent[WRITE_FD]) != 0) {
-			dterror("error closing pipe fd\n");
-		}
-		set_blocking(childToParent[READ_FD], false);
-
-		auto flags = fcntl(childToParent[READ_FD], F_GETFD);
-		if (flags < 0) {
-			dterrorx("fcntl failed: %s", strerror(errno));
-			return -1;
-		}
-
-		if (fcntl(childToParent[READ_FD], F_SETFD, flags | FD_CLOEXEC) < 0) {
-			dterrorx("Could not set FD_CLOEXEC: %s", strerror(errno));
-			return -1;
-		}
-
-		return childToParent[READ_FD];
-	}
-	return -1;
-}
 
 inline void embedded_stream_reader_t::discard(ssize_t num_bytes) {
 	assert(num_bytes + read_pointer <= last_range_end_pointer);
@@ -411,7 +415,7 @@ void stream_filter_t::register_reader(embedded_stream_reader_t* reader) {
 		this->open();
 	for (int i = 0; i < stream_readers.size(); ++i) {
 		if (stream_readers[i].get() == reader) {
-			dterrorx("Reader already registered");
+			dterrorf("Reader already registered");
 			return;
 		}
 	}
@@ -447,7 +451,7 @@ chdb::any_mux_t embedded_stream_reader_t::stream_mux() const {
 	assert((chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::ACTIVE &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::PENDING &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::RETRY) ||
-				 chdb::mux_common_ptr(mux)->scan_id >0);
+				 chdb::scan_in_progress(chdb::mux_common_ptr(mux)->scan_id));
 
 	return stream_filter->embedded_mux; }
 
@@ -455,7 +459,7 @@ void embedded_stream_reader_t::on_stream_mux_change(const chdb::any_mux_t& mux) 
 	assert((chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::ACTIVE &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::PENDING &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::RETRY) ||
-				 chdb::mux_common_ptr(mux)->scan_id >0);
+				 chdb::scan_in_progress(chdb::mux_common_ptr(mux)->scan_id));
 	stream_filter->embedded_mux = mux;
 }
 
@@ -470,7 +474,7 @@ void embedded_stream_reader_t::set_current_tp(const chdb::any_mux_t& embedded_mu
 	assert((chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::ACTIVE &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::PENDING &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::RETRY) ||
-				 chdb::mux_common_ptr(mux)->scan_id >0);
+				 chdb::scan_in_progress(chdb::mux_common_ptr(mux)->scan_id));
 	stream_filter->embedded_mux = embedded_mux;
 }
 
@@ -479,6 +483,82 @@ void embedded_stream_reader_t::update_stream_mux_nit(const chdb::any_mux_t& stre
 	assert((chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::ACTIVE &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::PENDING &&
 					chdb::mux_common_ptr(mux)->scan_status != chdb::scan_status_t::RETRY) ||
-				 chdb::mux_common_ptr(mux)->scan_id >0);
+				 chdb::scan_in_progress(chdb::mux_common_ptr(mux)->scan_id));
 	stream_filter->embedded_mux = stream_mux;
+}
+
+pid_t streamer_t::start() {
+	auto * pservice = get_service();
+	ss::string<32> service_id_;
+	ss::string<32> sid_pmt_;
+	ss::string<32> dest;
+	dest.format("{}:{:d}", stream.dest_host, stream.dest_port);
+	const char* cmd ="tsp";
+	ss::vector<const char*, 16> args = {cmd};
+	auto t2mi_pid = this->get_t2mi_pid();
+	if(t2mi_pid >=0) {
+		ss::string<32> t2mi_pid_;
+		t2mi_pid_.format("{:d}", t2mi_pid);
+		for(auto& a: {"-P", "t2mi", "--pid", (const char*)t2mi_pid_.c_str()}) {
+			args.push_back(a);
+		}
+	}
+	if(pservice) {
+		service_id_.format("{:d}", pservice->k.service_id);
+		sid_pmt_.format("{:d}/{:d}", pservice->k.service_id, pservice->pmt_pid);
+		//TODO: pat rewriting (requires service_id)
+
+		for(auto& a: {
+				"--realtime", "--initial-input-packets", "256",
+				"-P", "filter", "--pid" , "0",
+				"--service", (const char*)service_id_.c_str(),
+				"-P", "filter", "--pid", "0", "--negate", "--stuffing", // replace PAT will null packets
+				"-P", "pat", "--create",
+				"--add-service", (const char*)sid_pmt_.c_str(), //created new single service PAT
+				//"--inter-packet", "200",
+				"-O", "ip", "--enforce-burst", //"--rtp",
+				"--packet-burst", "128",
+				(const char*) dest.c_str(), (const char*)nullptr}) {
+			args.push_back(a);
+		}
+	} else {
+		for(auto& a: {
+				"--realtime", "--initial-input-packets", "256",
+				"-O", "ip", "--enforce-burst", //"--rtp",
+				"--packet-burst", "128",
+				//"--buffer-size", "33554432",
+				(const char*) dest.c_str(),
+				//"-O" , "file", "/tmp/test.ts",
+				(const char*)nullptr}) {
+			args.push_back(a);
+		}
+	}
+	auto [data_fd, command_pid] = start_command(fd, cmd, args); //stream
+	stream.streamer_pid = command_pid;
+	stream.owner = getpid();
+	stream.mtime = system_clock_t::to_time_t(now);
+	assert(stream.subscription_id >=0);
+	assert(stream.stream_state == devdb::stream_state_t::ON);
+	if (data_fd < 0) {
+		dterrorf("Could not start command");
+		return -1;
+	}
+	::close(fd);
+	fd = -1;
+	return command_pid;
+}
+
+void streamer_t::stop() {
+	assert(stream.streamer_pid > 0);
+	if (kill(stream.streamer_pid, SIGHUP) < 0) {
+		dterrorf("Error while sending signal: {}", strerror(errno));
+	}
+	if (waitpid(stream.streamer_pid, nullptr, 0) < 0) {
+		dterrorf("Error during wait: {}", strerror(errno));
+	}
+	stream.streamer_pid = -1;
+	stream.owner = -1;
+	stream.mtime = system_clock_t::to_time_t(now);
+	assert(stream.subscription_id >=0);
+	stream.stream_state = devdb::stream_state_t::OFF;
 }

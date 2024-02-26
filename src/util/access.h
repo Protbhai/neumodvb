@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -46,12 +46,12 @@ public:
 	}
 
 	data_t* operator() () {
-		//printf("GET ACCESS: %d %d\n", std::this_thread::get_id(), owner);
+		//printf("GET ACCESS: {:d} {:d}\n", std::this_thread::get_id(), owner);
 		if(true || std::this_thread::get_id() == owner) {
 			//printf("returning %p\n", &d);
 			return const_cast<data_t*>(&d);
 		} else {
-			dterrorx("Access from wrong thread: allowed=%s", owner_name);
+			dterrorf("Access from wrong thread: allowed={:s}", owner_name);
 			assert(0);
 			return nullptr;
 		}

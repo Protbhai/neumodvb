@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -102,7 +102,7 @@ public:
 	~MpvGLCanvas();
 
 	void Render();
-	bool SetCurrent() const;
+	bool SetCurrent();
 	bool SwapBuffers() /*override*/;
 	void *GetProcAddress(const char *name);
 
@@ -123,8 +123,6 @@ private:
 	void OnMpvWakeupEvent(wxThreadEvent &event);
 
 	void DoRender();
-
-	wxGLContext *glContext = nullptr;
 
 	wxDECLARE_EVENT_TABLE();
 };

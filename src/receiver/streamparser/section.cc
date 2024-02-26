@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -33,13 +33,17 @@
 #include "dvbtext.h"
 #include "opentv_string_decoder.h"
 #include "psi_impl.h"
-#include "xformat/ioformat.h"
 #include <iomanip>
 #include <iostream>
 
 using namespace dtdemux;
 using namespace dtypes;
 
+//#define PRINTTIME
+#ifdef PRINTTIME
+static int64_t processing_count;
+static int64_t processing_delay;
+#endif
 #define BCDCHARTOINT(x) (10 * ((x & 0xF0) >> 4) + (x & 0xF))
 #define lang_iso639(a, b, c) ((a) << 16 | (b) << 8 | (c))
 
@@ -214,7 +218,7 @@ namespace dtdemux {
 		auto* p = this->current_pointer(len);
 		if (!p)
 			return -1;
-		decodeText(ret, p, len);
+		decode_text(ret, p, len);
 		return 0;
 	}
 
@@ -292,7 +296,7 @@ namespace dtdemux {
 		auto* p = this->current_pointer(desc.len);
 		if (!p)
 			return -1;
-		decodeText(ret, p, desc.len);
+		decode_text(ret, p, desc.len);
 		return 0;
 	}
 
@@ -301,7 +305,7 @@ namespace dtdemux {
 		auto* p = this->current_pointer(len);
 		if (!p)
 			return -1;
-		decodeText(ret, p, len);
+		decode_text(ret, p, len);
 		return 0;
 	}
 
@@ -587,7 +591,7 @@ namespace dtdemux {
 			auto y UNUSED = get<uint16_t>();
 			ss::string<256> description;
 			get_fields<dvb_text_t>(description);
-			dtdebugx("FSTX: group=%d id=%d cat=%s", category_group, category_id, description.c_str());
+			dtdebugf("FSTX: group={:d} id={:d} cat={:s}", category_group, category_id, description.c_str());
 		}
 		assert(available() == end);
 		return has_error();
@@ -606,7 +610,7 @@ namespace dtdemux {
 			assert(desc_loop_len % 2 == 0);
 			while (available() > end1) {
 				auto channel_id UNUSED = get<uint16_t>() & 0xfff;
-				dtdebugx("FST: ChannelCategory group=%d cat_id=%d channel_id=%d\n", category_group, category_id, channel_id);
+				dtdebugf("FST: ChannelCategory group={:d} cat_id={:d} channel_id={:d}\n", category_group, category_id, channel_id);
 			}
 			assert(available() == end1);
 		}
@@ -614,7 +618,7 @@ namespace dtdemux {
 		assert(available() >= end);
 		if (available() > end) {
 			// this is not right! sometimes desc.len=12 and we end up here...
-			dterrorx("desc.len=%d skipping %d\n", desc.len, available() - end);
+			dterrorf("desc.len={:d} skipping {:d}\n", desc.len, available() - end);
 			skip(available() - end);
 		}
 		return has_error();
@@ -696,21 +700,21 @@ namespace dtdemux {
 		switch (linkage_type) {
 		case 0x02: // EPG service
 
-			dtdebugx("LINK to epg service nid=%d, tid=%d, sid=%d]\n", original_network_id, ts_id, service_id);
+			dtdebugf("LINK to epg service nid={:d}, tid={:d}, sid={:d}]\n", original_network_id, ts_id, service_id);
 			l.network_id = original_network_id;
 			l.ts_id = ts_id;
 			break;
 
 		case 0x04: // TS containing complete Network/Bouquet SI
 
-			dtdebugx("LINK to network/bouquet info nid=%d, tid=%d, sid=%d]\n", original_network_id, ts_id, service_id);
+			dtdebugf("LINK to network/bouquet info nid={:d}, tid={:d}, sid={:d}]\n", original_network_id, ts_id, service_id);
 			l.network_id = original_network_id;
 			l.ts_id = ts_id;
 			break;
 		case 0x09: // System Software Update Service (TS 102 006 [11])
 		default:
 #if 0
-			dtdebugx("NIT: unknown linkage: nid=%d, tid=%d, sid=%d link_type=0x%x]\n",
+			dtdebugf("NIT: unknown linkage: nid={:d}, tid={:d}, sid={:d} link_type=0x{:x}]\n",
 							 original_network_id, ts_id, service_id, linkage_type);
 			//not interested...
 #endif
@@ -731,19 +735,19 @@ namespace dtdemux {
 		auto linkage_type = get<uint8_t>();
 		switch (linkage_type) {
 		case 0x01: // information service
-			dtdebugx("LINK to info service nid=%d, tid=%d, sid=%d]\n", original_network_id, ts_id, service_id);
+			dtdebugf("LINK to info service nid={:d}, tid={:d}, sid={:d}]\n", original_network_id, ts_id, service_id);
 			break;
 
 		case 0x02: // epg service
-			// dtdebugx("LINK to epg service nid=%d, tid=%d, sid=%d]\n", original_network_id, ts_id, service_id);
+			// dtdebugf("LINK to epg service nid={:d}, tid={:d}, sid={:d}]\n", original_network_id, ts_id, service_id);
 			break;
 
 		case 0x04: // TS containing complete Network/Bouquet SI
-			// dtdebugx("LINK to network/bouquet nid=%d, tid=%d, sid=%d]\n", original_network_id, ts_id, service_id);
+			// dtdebugf("LINK to network/bouquet nid={:d}, tid={:d}, sid={:d}]\n", original_network_id, ts_id, service_id);
 			break;
 
 		case 0x05: // service replacement service
-			// dtdebugx("LINK to replacement service nid=%d, tid=%d, sid=%d]\n", original_network_id, ts_id, service_id);
+			// dtdebugf("LINK to replacement service nid={:d}, tid={:d}, sid={:d}]\n", original_network_id, ts_id, service_id);
 			break;
 		case 0x09: // System Software Update Service (TS 102 006 [11])
 			break;
@@ -785,7 +789,19 @@ namespace dtdemux {
 		auto* p = (uint8_t*)this->current_pointer(len);
 		if (!p)
 			return -1;
+#ifdef PRINTTIME
+		auto xxx_start = system_clock_t::now();
+#endif
 		opentv_decode_string(rec.event_name, p, len, opentv_table_type_t::SKY_UK);
+#ifdef PRINTTIME
+		auto now = system_clock_t::now();
+		processing_delay +=  std::chrono::duration_cast<std::chrono::microseconds>(now -xxx_start).count();
+		processing_count ++;
+		if(processing_count>0) {
+			dtdebug_nicex("PERF: {:f}us per call ({:d}/{:d})",
+										processing_delay/(double)processing_count, processing_delay, processing_count);
+		}
+#endif
 		return 0;
 	}
 
@@ -795,7 +811,19 @@ namespace dtdemux {
 		auto* p = (uint8_t*)this->current_pointer(len);
 		if (!p)
 			return -1;
+#ifdef PRINTTIME
+		auto xxx_start = system_clock_t::now();
+#endif
 		opentv_decode_string(rec.story, p, len, opentv_table_type_t::SKY_UK);
+#ifdef PRINTTIME
+		auto now = system_clock_t::now();
+		processing_delay +=  std::chrono::duration_cast<std::chrono::microseconds>(now -xxx_start).count();
+		processing_count ++;
+		if(processing_count>0) {
+			dtdebug_nicex("PERF: {:f}us per call ({:d}/{:d})",
+										processing_delay/(double)processing_count, processing_delay, processing_count);
+		}
+#endif
 		return 0;
 	}
 
@@ -806,7 +834,20 @@ namespace dtdemux {
 		auto* p = (uint8_t*)this->current_pointer(len);
 		if (!p)
 			return -1;
+#ifdef PRINTTIME
+		auto xxx_start = system_clock_t::now();
+#endif
 		opentv_decode_string(description, p, len, opentv_table_type_t::SKY_UK);
+#ifdef PRINTTIME
+		auto now = system_clock_t::now();
+		processing_delay +=  std::chrono::duration_cast<std::chrono::microseconds>(now -xxx_start).count();
+		processing_count ++;
+		if(processing_count>0) {
+			dtdebug_nicex("PERF: {:f}us per call ({:d}/{:d})",
+										processing_delay/(double)processing_count, processing_delay, processing_count);
+		}
+#endif
+
 		return 0;
 	}
 
@@ -833,7 +874,7 @@ namespace dtdemux {
 			get_fields<dvb_text_t>(item);
 		}
 		assert(available() == end);
-		ss::string<128> text;
+
 		get_fields<dvb_text_t>(rec.story); // should be appended to story
 		return 0;
 	}
@@ -862,7 +903,7 @@ namespace dtdemux {
 		auto* p1 = current_pointer(len);
 		if (!p1)
 			return -1;
-		decodeText(text, p1, len);
+		decode_text(text, p1, len);
 		return 0;
 	}
 
@@ -931,20 +972,19 @@ namespace dtdemux {
 				auto desc = get_ca(s, _desc, info.stream_pid);
 
 				ca_descriptors.push_back(desc);
-				dtdebug("sid=" << service_id << ": ECM PID=" << desc.ca_pid << " system_id=" << desc.ca_system_id
-								<< " stream_pid=" << desc.stream_pid);
+				dtdebugf("sid={}: ECM PID={} system_id={} stream_pid={}", service_id, desc.ca_pid,
+								 desc.ca_system_id, desc.stream_pid);
 			} break;
 			case SI::ServiceMoveDescriptorTag: {
 				auto desc = s.get<service_move_info_t>(_desc, info.stream_pid);
 				service_move_descriptors.push_back(desc);
-				dtdebug("sid=" << service_id << ": service move descriptor "
-								<< " new: network_id" << desc.new_original_network_id << " tsid=" << desc.new_transport_stream_id
-								<< " sid=" << desc.new_service_id);
+				dtdebugf("sid={}: service move descriptor new: network_id {} ts_id={} sid={}", service_id,
+								 desc.new_original_network_id, desc.new_transport_stream_id, desc.new_service_id);
 			} break;
 			case SI::MHP_PrefetchDescriptorTag: {
 				static int called = 0;
 				if (!called) {
-					dtdebug_nice("MHP_PrefetchDescriptor " << (int)_desc.tag << "=" << name_of_descriptor_tag(_desc.tag));
+					dtdebug_nicef("MHP_PrefetchDescriptor {}={}", (int)_desc.tag, name_of_descriptor_tag(_desc.tag));
 					called = 1;
 				}
 				s.skip(_desc.len);
@@ -958,7 +998,7 @@ namespace dtdemux {
 				}
 				auto component_tag = s.get<uint8_t>();
 				if (!called) {
-					dtdebug_nice("Stream id: " << (int)component_tag);
+					dtdebug_nicef("Stream id: {}", (int)component_tag);
 					called = 1;
 				}
 			} break;
@@ -1000,7 +1040,6 @@ namespace dtdemux {
 						num_sky_summary_pids++;
 				} else
 					s.skip(private_desc.len); // 0x40 1 byte for IEPG service 4398
-				// dtdebugx("private data descriptor 0x%x len=%d", private_data_specifier, private_desc.len);
 				if (private_data_specifier == 0x46534154 && info.stream_pid >= 3840 && info.stream_pid <= 3844) {
 					has_freesat_epg = true; // has a local freesat stream
 					num_freesat_pids++;
@@ -1038,9 +1077,8 @@ namespace dtdemux {
 					info.num_t2mi_streams_minus_one = num_t2mi_streams_minus_one;
 				} break;
 				default:
-					dtdebug_nice("PMT: unhandled extension descriptor " << (int)desc_tag_extension << "="
-											 << name_of_descriptor_tag(desc_tag_extension)
-											 << " size=" << (int)_desc.len);
+					dtdebug_nicef("PMT: unhandled extension descriptor {}={} size={}", (int)desc_tag_extension,
+												name_of_descriptor_tag(desc_tag_extension),(int)_desc.len);
 
 					s.skip(_desc.len - 1); // we already read 1 byte
 				}
@@ -1052,16 +1090,15 @@ namespace dtdemux {
 			case SI::VBIDataDescriptorTag:
 			case SI::TeletextDescriptorTag:
 			default:
-				dtdebug_nice("PMT: unhandled descriptor " << (int)_desc.tag << "=" << name_of_descriptor_tag(_desc.tag)
-										 << " size=" << (int)_desc.len);
-
+				dtdebug_nicef("PMT: unhandled descriptor {}={} size={}", (int)_desc.tag,
+											name_of_descriptor_tag(_desc.tag), (int)_desc.len);
 				s.skip(_desc.len);
 				break;
 			}
 		}
 
 		if (s.bytes_read != end) {
-			dtdebug_nicex("Unexpected: s.bytes_read=%d != end=%d", s.bytes_read, end);
+			dtdebug_nicef("Unexpected: s.bytes_read={:d} != end={:d}", s.bytes_read, end);
 			if(s.bytes_read > end)
 				s.throw_bad_data();
 			s.bytes_read = end;
@@ -1095,11 +1132,12 @@ namespace dtdemux {
 	}
 #endif
 
-	bool crc_is_correct(const ss::bytebuffer_& payload) {
+#if 0
+	inline bool crc_is_correct(const ss::bytebuffer_& payload) {
 		auto crc = crc32(payload.buffer(), payload.size());
 		return crc == 0;
 	}
-
+#endif
 	void stored_section_t::parse_section_header(section_header_t& ret) {
 		ret.pid = pid;
 
@@ -1121,7 +1159,7 @@ namespace dtdemux {
 #if 0
 		if ((len & 0x3000) != 0x3000) {
 
-			dtdebug("Bad reserved bits"); //tests reserve flags
+			dtdebugf("Bad reserved bits"); //tests reserve flags
 			THROW_BAD_DATA;
 		}
 #endif
@@ -1154,7 +1192,7 @@ namespace dtdemux {
 		pat_services.version_number = hdr.version_number;
 		pat_services.ts_id = ts_id;
 		if (hdr.table_id != 0x0) {
-			LOG4CXX_ERROR(logger, "PAT with bad table id " << (int)hdr.table_id);
+			dterrorf("PAT with bad table id {}", (int)hdr.table_id);
 			return false;
 		}
 
@@ -1171,12 +1209,12 @@ namespace dtdemux {
 			return false;
 		if (hdr.current_next) {
 		} else {
-			dtdebug("Received `next' PAT (unhandled)");
+			dtdebugf("Received `next' PAT (unhandled)");
 		}
 
 		auto num_entries = remaining / 4;
 		if (num_entries == 0)
-			dtdebugx("empty pat");
+			dtdebugf("empty pat");
 #if 0
 		LOG4CXX_DEBUG(logger, "PAT=" << (int)hdr.table_id << " len=" << hdr.len << " ts_id=" << ts_id
 									<< " vers=" << (int)hdr.version_number << " current=" << (int)hdr.current_next
@@ -1185,12 +1223,10 @@ namespace dtdemux {
 		for (int i = 0; i < num_entries; ++i) {
 			uint16_t program_number = this->get<uint16_t>();
 			uint16_t pid = this->get<uint16_t>() & 0x1fff;
-			// LOG4CXX_DEBUG(logger, "program: no=" << program_number << " pid=" << pid);
 			pat_entry_t e(program_number, pid);
 			pat_services.entries.push_back(e);
 		}
 		uint32_t crc UNUSED = this->get<uint32_t>(); // avoid compiler warning
-		// dtdebugx("PAT CRC=0x%x", crc);
 		assert(this->available() == 0);
 		return true;
 	}
@@ -1206,12 +1242,13 @@ namespace dtdemux {
 		// current_version_number = hdr.version_number;
 		int pid = hdr.pid;
 		if (hdr.table_id != 0x02) {
-			dterror("PMT PID=" << pid << ": with bad table id " << (int)hdr.table_id);
+			dterrorf("PMT PID={}: with bad table id ", pid, (int)hdr.table_id);
 			return false;
 		}
 
 		if (hdr.section_number != 0 || hdr.last_section_number != 0) {
-			dterror("Bad PMT: secno=" << (int)hdr.section_number << " last_sec_no=" << (int)hdr.last_section_number);
+			dterrorf("Bad PMT: secno={} last_sec_no={}", (int)hdr.section_number,
+							 (int)hdr.last_section_number);
 			return false;
 		}
 
@@ -1303,7 +1340,7 @@ namespace dtdemux {
 
 		if (hdr.current_next) {
 		} else {
-			dtdebug("Received 'next' in NIT");
+			dtdebugf("Received 'next' in NIT");
 			// this happens on 52E 11246V (only next)
 		}
 		auto section_number = hdr.section_number;
@@ -1328,14 +1365,13 @@ namespace dtdemux {
 
 			case SI::LinkageDescriptorTag: {
 				// if (network.bouquet_linkage.size() > 0)
-				// dterrorx("Unexpected: more than one bouque linkage: num=%d\n", network.bouquet_linkage.size() + 1);
+				// dterrorf("Unexpected: more than one bouque linkage: num={:d}\n", network.bouquet_linkage.size() + 1);
 				bouquet_linkage_t bouquet_linkage;
 				this->get_fields<linkage_descriptor_t>(bouquet_linkage, desc);
 				network.bouquet_linkage.push_back(bouquet_linkage);
 			} break;
 			default:
-				dtdebug_nice("NIT"
-										 << ": unknown descriptor " << (int)desc.tag << "=" << name_of_descriptor_tag(desc.tag));
+				dtdebug_nicef("NIT: unknown descriptor {}={}", (int)desc.tag, name_of_descriptor_tag(desc.tag));
 			case SI::PrivateDataSpecifierDescriptorTag:
 				this->skip(desc.len);
 				break;
@@ -1387,7 +1423,7 @@ namespace dtdemux {
 				} break;
 
 				case SI::S2SatelliteDeliverySystemDescriptorTag: {
-					dterror("S2SatelliteDeliverySystemDescriptor");
+					dterrorf("S2SatelliteDeliverySystemDescriptor");
 					if (desc1.len > 0) { // solves problem on 5.0W 12340H
 						this->get_fields<s2_satellite_delivery_system_descriptor_t>(dvbs_mux);
 						if (!is_dvbs) {
@@ -1418,14 +1454,14 @@ namespace dtdemux {
 					mux.c.nit_ts_id = ts_id;
 					is_dvbt = true;
 					if (this->get_fields<terrestrial_delivery_system_descriptor_t>(dvbt_mux) < 0) {
-						dterror("Bad mux found: " << dvbt_mux);
+						dterrorf("Bad mux found: {}", dvbt_mux);
 					}
 				} break;
 				case SI::ServiceListDescriptorTag: {
 					bouquet_t bouquet; // todo
 					service_list_t service_list{network_id, ts_id, bouquet};
 					if (this->available() - desc1.len < end1) {
-						dterrorx("Incorrect section available=%d desc.len=%d end=%d",
+						dterrorf("Incorrect section available={:d} desc.len={:d} end={:d}",
 										 this->available(), desc1.len, end1);
 						return false;
 					}
@@ -1451,7 +1487,7 @@ namespace dtdemux {
 #if 0
 			int x = network.is_dvbs + network.is_dvbc + network.is_dvbt;
 			if(x!=1) {
-				dterrorx("NIT ts section without descriptors on %s network", is_actual ? "ACTUAL" : "OTHER");
+				dterrorf("NIT ts section without descriptors on %s network", is_actual ? "ACTUAL" : "OTHER");
 			}
 #endif
 #endif
@@ -1501,7 +1537,7 @@ namespace dtdemux {
 
 		if (hdr.current_next) {
 		} else {
-			dtdebug("Received 'next' SDT unhandled");
+			dtdebugf("Received 'next' SDT unhandled");
 		}
 		auto section_number = hdr.section_number;
 		auto last_section_number = hdr.last_section_number;
@@ -1569,8 +1605,8 @@ namespace dtdemux {
 					if (desc.tag >= 0x80 && desc.tag <= 0xfe) {
 						// user defined descriptor
 					} else {
-						dtdebug_nice(service.name << ": unknown descriptor " << (int)desc.tag << "="
-												 << name_of_descriptor_tag(desc.tag));
+						dtdebug_nicef("{}: unknown descriptor {}={}", service.name, (int)desc.tag,
+													name_of_descriptor_tag(desc.tag));
 					}
 					this->skip(desc.len);
 					break;
@@ -1582,21 +1618,21 @@ namespace dtdemux {
 			}
 			assert(end >= this->available());
 			if (end > this->available()) {
-				dterrorx("Extra bytes after descriptor loop: %d/%d", end, this->available());
+				dterrorf("Extra bytes after descriptor loop: {:d}/{:d}", end, this->available());
 				this->skip(end - this->available());
 			}
 			if (service.service_type == 12 && strcmp(service.name.c_str(), "FreesatHome") == 0)
 				ret.has_freesat_home_epg = true;
 			if (service.name.size() == 0) {
-				service.name.sprintf("Service %d", service.k.service_id);
+				service.name.format("Service {:d}", service.k.service_id);
 			}
 		}
 		if (this->available() < 4) {
-			dterrorx("Too few bytes left at end of sdt");
+			dterrorf("Too few bytes left at end of sdt");
 			return false;
 		}
 		if (this->available() > 4) {
-			dterrorx("bytes left at end of sdt");
+			dterrorf("bytes left at end of sdt");
 			this->skip(this->available() - 4);
 		}
 		uint32_t crc UNUSED = this->get<uint32_t>(); // avoid compiler warning
@@ -1623,13 +1659,13 @@ namespace dtdemux {
 
 		if (hdr.current_next) {
 		} else {
-			dtdebug("Received 'next' BAT unhandled");
+			dtdebugf("Received 'next' BAT unhandled");
 		}
 		auto section_number = hdr.section_number;
 		auto last_section_number = hdr.last_section_number;
 
 #if 0
-		dtdebug("BAT=" << (int)hdr.table_id << " len=" << hdr.len << " bouquet_id=" <<
+		dtdebugf("BAT=" << (int)hdr.table_id << " len=" << hdr.len << " bouquet_id=" <<
 						bouquet.bouquet_id << " vers=" << (int)hdr.version_number << " current=" <<
 						(int)hdr.current_next);
 #endif
@@ -1686,14 +1722,14 @@ namespace dtdemux {
 			} break;
 			case SI::LocalTimeOffsetDescriptorTag:
 
-				dtdebug("BAT: unknown descriptor " << (int)desc.tag << "=" << name_of_descriptor_tag(desc.tag)); // 129 (0x81 User defined/ATSC reserved)
+				dtdebugf("BAT: unknown descriptor {}={}", (int)desc.tag, name_of_descriptor_tag(desc.tag)); // 129 (0x81 User defined/ATSC reserved)
 				this->skip(desc.len);
 				break;
 			default:
 				if (desc.tag >= 0x80 && desc.tag <= 0xfe) {
 					// user defined descriptor
 				} else {
-					dtdebug("BAT: unknown descriptor " << (int)desc.tag << "=" << name_of_descriptor_tag(desc.tag));
+					dtdebugf("BAT: unknown descriptor {}={}", (int)desc.tag, name_of_descriptor_tag(desc.tag));
 				}
 				this->skip(desc.len);
 				break;
@@ -1702,12 +1738,12 @@ namespace dtdemux {
 				return false;
 			tst -= (desc.len + 2);
 			if (tst != this->available()) {
-				dterrorx("Error while parsing bat section: %d != %d", tst, this->available());
+				dterrorf("Error while parsing bat section: {:d} != {:d}", tst, this->available());
 				return false;
 			}
 		}
 		if(end > this->available()) {
-			dterrorx("Read more bytes than we were supposed to: end=%d available=%d", end, this->available());
+			dterrorf("Read more bytes than we were supposed to: end={:d} available={:d}", end, this->available());
 			//happens on 7.0E 10804V
 			return false;
 		}
@@ -1756,7 +1792,8 @@ namespace dtdemux {
 					break;
 
 				default:
-					dtdebug("BAT: unknown descriptor " << (int)desc.tag << "=" << name_of_descriptor_tag(desc.tag)); // 129 (0x81 User defined/ATSC reserved)
+					dtdebugf("BAT: unknown descriptor {}={}", (int)desc.tag,
+									 name_of_descriptor_tag(desc.tag)); // 129 (0x81 User defined/ATSC reserved)
 				case 0x80 ... 0x82: //user defined
 				case 0x84 ... 0x85: //user defined
 				case 0x87 ... 0xb0: //user defined
@@ -1790,7 +1827,7 @@ namespace dtdemux {
 	}
 
 	bool stored_section_t::parse_eit_section(epg_t& ret, section_header_t& hdr) {
-		ret.epg_service.service_id = hdr.table_id_extension;
+		ret.service_key.service_id = hdr.table_id_extension;
 		ret.is_actual = (hdr.table_id == 0x4e) || ((hdr.table_id >= 0x50) && (hdr.table_id <= 0x5f));
 
 		if (!hdr.section_syntax_indicator) {
@@ -1800,19 +1837,19 @@ namespace dtdemux {
 
 		if (hdr.current_next) {
 		} else {
-			dtdebug("Received 'next' EIT unhandled");
+			dtdebugf("Received 'next' EIT unhandled");
 		}
 		auto section_number = hdr.section_number;
 		auto last_section_number = hdr.last_section_number;
 
-		ret.epg_service.ts_id = hdr.table_id_extension1;
-		ret.epg_service.network_id = hdr.table_id_extension2;
+		ret.service_key.ts_id = hdr.table_id_extension1;
+		ret.service_key.network_id = hdr.table_id_extension2;
 		auto segment_last_section_number = this->get<uint8_t>();
 		auto last_table_id = this->get<uint8_t>();
 		while (this->available() > 4) {
 			ret.epg_records.resize(ret.epg_records.size() + 1);
 			epgdb::epg_record_t& rec = ret.epg_records[ret.epg_records.size() - 1];
-			rec.k.service = ret.epg_service;
+			rec.k.service = ret.service_key;
 			rec.k.event_id = this->get<uint16_t>();
 
 			this->get_fields<start_time_duration_t>(rec);
@@ -1848,7 +1885,7 @@ namespace dtdemux {
 					this->get_fields<multilingual_component_descriptor_t>(rec, desc);
 					break;
 				default:
-					dtdebugx("Unknown EIT descriptor 0x%x", desc.tag);
+					dtdebugf("Unknown EIT descriptor 0x{:x}", desc.tag);
 				case 0x80 ... 0xfe: // user defined
 				case SI::LinkageDescriptorTag:
 				case SI::PDCDescriptorTag:
@@ -1895,7 +1932,7 @@ namespace dtdemux {
 			current_version_number = hdr.version_number;
 #endif
 		} else {
-			dtdebug("Received 'next' SKY unhandled");
+			dtdebugf("Received 'next' SKY unhandled");
 		}
 		auto section_number = hdr.section_number;
 		auto last_section_number = hdr.last_section_number;
@@ -1961,7 +1998,7 @@ namespace dtdemux {
 		auto offset = (int)this->bytes_read + (int)(8 * num_channels);
 		auto len = (int)this->payload.size() - offset;
 		if (len <= 0) {
-			dterrorx("Invalid channel section");
+			dterrorf("Invalid channel section");
 			return -1;
 		}
 		// hdr.table_id_extension: 0 for sd and 2 for hd and 3 for dtt
@@ -1990,7 +2027,7 @@ namespace dtdemux {
 			auto* p = names.current_pointer(tlen);
 			if (!p)
 				return -1;
-			decodeText(name, p, tlen);
+			decode_text(name, p, tlen);
 			RETURN_ON_ERROR false;
 		}
 		return true;
@@ -2068,7 +2105,7 @@ namespace dtdemux {
 		auto x1 = this->get<uint16_t>(); // byte 12,13
 		RETURN_ON_ERROR false;
 		this->get_fields<dvb_text_t>(rec.story); // 1 byte
-		rec.story.sprintf("\n");
+		rec.story.format("\n");
 		auto x2 = this->get<uint8_t>(); // 1 byte
 		RETURN_ON_ERROR false;
 		this->get_fields<dvb_text_t>(rec.story);
@@ -2110,7 +2147,7 @@ namespace dtdemux {
 		this->skip(10);
 
 		this->get_fields<dvb_text_t>(rec.story); // 1 byte byte pos=19 contains length
-		rec.story.sprintf("\n");
+		rec.story.format("\n");
 		RETURN_ON_ERROR false;												// pos now points here
 		this->get_fields<mhw2_dvb_text_t>(rec.story); // 2 bytes length field
 
@@ -2165,28 +2202,34 @@ namespace dtdemux {
 
 extern const char* lang_name(const char* code);
 
-std::ostream& dtdemux::operator<<(std::ostream& os, const dtdemux::pid_info_t& info) {
-	stdex::printf(os, "PID[%0x] type=0x%x ", info.stream_pid, (int)info.stream_type);
+auto fmt::formatter<dtdemux::pid_info_t>::format(const dtdemux::pid_info_t& info, format_context& ctx) const
+-> format_context::iterator
+{
+	auto ret = fmt::format_to(ctx.out(), "PID[{:0x}] type=0x{:x} ", info.stream_pid, (int)info.stream_type);
 	if (info.audio_lang.lang_code[0] != 0)
-		stdex::printf(os, " lang=%s %s", &info.audio_lang.lang_code[0], lang_name(&info.audio_lang.lang_code[0]));
+		ret = fmt::format_to(ctx.out(), " lang={:s} {:s}", &info.audio_lang.lang_code[0],
+									 lang_name(&info.audio_lang.lang_code[0]));
 	if (info.subtitle_descriptors.size() > 0)
-		stdex::printf(os, " subs={");
+		ret = fmt::format_to(ctx.out(), " subs={{");
 	for (const auto& s : info.subtitle_descriptors) {
-		stdex::printf(os, " type=0x%x ", (int)s.subtitle_type);
+		ret = fmt::format_to(ctx.out(),  " type=0x{:x} ", (int)s.subtitle_type);
 		if (s.lang_code[0] != 0)
-			stdex::printf(os, " lang=%s", &s.lang_code[0]);
-		stdex::printf(os, "page=%03d-%03d  ", s.composition_page_id, s.ancillary_page_id);
+					ret = fmt::format_to(ctx.out(),  " lang={:s}", &s.lang_code[0]);
+		ret = fmt::format_to(ctx.out(), "page={:03d}-{:03d}  ", s.composition_page_id, s.ancillary_page_id);
 	}
 	if (info.subtitle_descriptors.size() > 0)
-		stdex::printf(os, " }");
-	return os;
+		ret = fmt::format_to(ctx.out()," }}");
+	return ret;
 }
 
-std::ostream& dtdemux::operator<<(std::ostream& os, const dtdemux::pmt_info_t& pmt) {
+auto fmt::formatter<dtdemux::pmt_info_t>::format(const dtdemux::pmt_info_t& pmt, format_context& ctx) const
+-> format_context::iterator
+{
+	auto ret = ctx.out();
 	for (auto pid : pmt.pid_descriptors) {
-		os << pid << "\n";
+		ret = fmt::format_to(ctx.out(), "{}\n", pid);
 	}
-	return os;
+	return ret;
 }
 
 ss::vector<language_code_t, 8> pmt_info_t::audio_languages() const {
@@ -2377,7 +2420,7 @@ pmt_info_t::make_preferred_pmt_ts(ss::bytebuffer_& output,
 }
 
 
-pmt_info_t dtdemux::parse_pmt_section(const ss::bytebuffer_& pmt_section_data, uint16_t pmt_pid) {
+pmt_info_t dtdemux::parse_pmt_section(ss::bytebuffer_& pmt_section_data, uint16_t pmt_pid) {
 	stored_section_t section(pmt_section_data, pmt_pid); //@todo performs needless copy
 	pmt_info_t pmt;
 	//read the original full pmt

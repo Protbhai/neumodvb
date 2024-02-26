@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -20,16 +20,15 @@
 #include "../util/dtassert.h"
 #include "../util/dtassert.h"
 #include "neumotime.h"
-#include "ssaccu.h"
-#include "xformat/ioformat.h"
 #include <memory.h>
 #include <time.h>
 
-
-std::ostream& operator<<(std::ostream& os, const milliseconds_t& a) {
+fmt::format_context::iterator
+fmt::formatter<milliseconds_t>::format(const milliseconds_t& a, format_context& ctx) const
+{
 	int h, m, s, u;
 	if (int64_t(a) == -1)
-		stdex::printf(os, "end");
+		return fmt::format_to(ctx.out(), "end");
 	else {
 		auto p = (int64_t)a;
 		h = (p / (1000L * 60 * 60));
@@ -37,7 +36,6 @@ std::ostream& operator<<(std::ostream& os, const milliseconds_t& a) {
 		s = (p / (1000L)) - (h * 3600) - (m * 60);
 		u = p - (h * 1000L * 60 * 60) - (m * 1000L * 60) - (s * 1000L);
 		// str.sprintf("%08lu [%02d:%02d:%02d.%04d]", ull, h, m, s, u);
-		stdex::printf(os, "%02d:%02d:%02d.%04d", h, m, s, u);
+		return fmt::format_to(ctx.out(), "{:02d}:{:02d}:{:02d}.{:04d}", h, m, s, u);
 	}
-	return os;
 }

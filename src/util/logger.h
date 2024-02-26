@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  * Copyright notice:
  *
  * This program is free software; you can redistribute it and/or modify
@@ -43,109 +43,64 @@ struct audio_language_t;
 struct audio_stream_t;
 struct subtitle_stream_t;
 
-namespace std { //needed ot log4cxx creates errors
-std::ostream& operator<<(std::ostream& os, const ss::string_& a);
-
-std::ostream& operator<<(std::ostream& os, system_time_t a);
-
-};
-
-
-
-
 namespace dtdemux {
 	struct pts_dts_t;
 	struct pcr_t;
-
-	std::ostream& operator<<(std::ostream& os,  const pts_dts_t& a);
-	std::ostream& operator<<(std::ostream& os,  const pcr_t& a);
 }
 
 
-
-#define dterror(text, args...)			\
-		LOG4CXX_ERROR(logger, text, ##args)
-
-#define dtinfo(text, args...)			\
-		LOG4CXX_INFO(logger, text, ##args)
-
-#define dtdebug(text, args...)			\
-		LOG4CXX_DEBUG(logger, text, ##args)
-
-#define dtthrow(text, args...)											\
-	do {																							\
-	std::stringstream ss;															\
-	ss << text  ##args;																\
-	throw std::runtime_error(ss.str());								\
+//alternative for dtdebug
+#define dtinfof(fmt, args...)																						\
+	do {																																	\
+		ss::string<256> msg;																								\
+		msg.format(fmt, ##args);																						\
+		LOG4CXX_INFO(logger, msg.c_str());																	\
 	} while(0)
 
-#define dterror_nice(text, args...)			\
+#define dterror_nicef(fmt, args...)																			\
 	do {																																	\
 		static int ___count=0; static time_t ___last=0; time_t ___now=time(NULL);	\
 		if(___now-___last<1) {___count++;break;}														\
-		LOG4CXX_ERROR(logger, text, ##args);								\
-		if(___count) 		LOG4CXX_ERROR(logger, "Last message repeated " << ___count << " times"); \
+		ss::string<256> msg;																								\
+		msg.format(fmt, ##args);																						\
+		LOG4CXX_ERROR(logger, msg.c_str());																	\
+		if(___count) LOG4CXX_ERROR(logger, "Last message repeated " << ___count << " times"); \
 		___count=0;___last=___now;																					\
 	} while(0)
 
-
-#define dtdebug_nice(text, args...)			\
+#define dtdebug_nicef(fmt, args...)																			\
 	do {																																	\
 		static int ___count=0; static time_t ___last=0; time_t ___now=time(NULL);	\
 		if(___now-___last<1) {___count++;break;}														\
-		LOG4CXX_DEBUG(logger, text, ##args);																\
+		ss::string<256> msg;																								\
+		msg.format(fmt, ##args);																						\
+		LOG4CXX_DEBUG(logger, msg.c_str());																	\
 		if(___count) LOG4CXX_DEBUG(logger, "Last message repeated " << ___count << " times"); \
 		___count=0;___last=___now;																					\
 	} while(0)
 
-
-#define dtdebug_nicex(fmt, args...)			\
+//alternative for dtdebug
+#define dtdebugf(fmt, args...)																					\
 	do {																																	\
-		static int ___count=0; static time_t ___last=0; time_t ___now=time(NULL);	\
-		if(___now-___last<1) {___count++;break;}														\
-		char msg[256];																											\
-		snprintf(msg, 255, fmt, ##args);																		\
-		LOG4CXX_DEBUG(logger, msg);																					\
-		if(___count) LOG4CXX_DEBUG(logger, "Last message repeated " << ___count << " times"); \
-		___count=0;___last=___now;																					\
+		ss::string<256> msg;																								\
+		msg.format(fmt, ##args);																						\
+		LOG4CXX_DEBUG(logger, msg.c_str());																	\
 	} while(0)
 
-
-#define dtdebugx(fmt, args...)																					\
+//alternative for dtdebug
+#define dterrorf(fmt, args...)																					\
 	do {																																	\
-		char msg[256];																											\
-		snprintf(msg, 255, fmt, ##args);																		\
-		LOG4CXX_DEBUG(logger, msg);																					\
-	} while(0)
-
-#define dtthrowx(fmt, args...)																					\
-	do {																																	\
-		char msg[256];																											\
-		snprintf(msg, 255, fmt, ##args);																		\
-		throw std::runtime_error(std::string(msg));													\
-	} while(0)
-
-#define dterrorx(fmt, args...)																					\
-	do {																																	\
-		char msg [256];																											\
-		snprintf(msg, 255, fmt, ##args);																		\
-		LOG4CXX_ERROR(logger, msg);																					\
+		ss::string<256> msg;																								\
+		msg.format(fmt, ##args);																						\
+		LOG4CXX_ERROR(logger, msg.c_str());																	\
 	} while(0)
 
 //error which should be reported to the user
-#define user_errorx(fmt, args...)																				\
+#define user_errorf(fmt, args...)																				\
 	do {																																	\
 		user_error_.clear();																								\
-		user_error_.sprintf(fmt, ##args);																		\
+		user_error_.format(fmt, ##args);																		\
 		LOG4CXX_ERROR(logger, user_error_.c_str());													\
-	} while(0)
-
-//error which should be reported to the user
-#define user_error(text)														\
-	do {																							\
-		user_error_.clear();														\
-		ss::accu_t(user_error_) << text;								\
-		LOG4CXX_ERROR(logger, user_error_.c_str());			\
 	} while(0)
 
 inline int dttime_(steady_time_t& dt_timer,int timeout,const char*func,int line)
@@ -155,7 +110,7 @@ inline int dttime_(steady_time_t& dt_timer,int timeout,const char*func,int line)
 	int ret =  std::chrono::duration_cast<std::chrono::milliseconds>(now -dt_timer).count();
 	dt_timer = now;
 	if(timeout>=0&&ret>=timeout) {
-		dtdebugx("%s_%d TIME: %d",func,line,ret);
+		dtdebugf("{:s}_{:d} TIME: {:d}",func,line,ret);
 	}
 	return ret;
 }

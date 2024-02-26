@@ -1,5 +1,5 @@
 /*
- * Neumo dvb (C) 2019-2023 deeptho@gmail.com
+ * Neumo dvb (C) 2019-2024 deeptho@gmail.com
  *
  * Copyright notice:
  *
@@ -21,7 +21,7 @@
 #include "neumodb/{{dbname}}/{{dbname}}_db.h"
 
 using namespace {{dbname}};
-
+{% if false %}
 {%for enum in enums %}
 template<>
 EXPORT const char* enum_to_str<{{enum.name}}>(const {{enum.name}}& val)
@@ -33,15 +33,13 @@ EXPORT const char* enum_to_str<{{enum.name}}>(const {{enum.name}}& val)
 	break;
 	{% endfor %}
 	default:
-		dterror("Illegal value for enum {{enum.name}}");
+		dterrorf("Illegal value for enum {{enum.name}}");
 		return "????";
 	}
 };
 
-	//template const char* enum_to_str<{{enum.name}}>(const {{enum.name}}& val); //instantiate
-
 {%endfor%}
-
+{% endif %}
 
 
 {%for enum in enums %}
@@ -58,7 +56,5 @@ bool enum_is_valid<{{enum.name}}>(const {{enum.name}}& val)
 		return false;
 	}
 };
-
-	//template const char* enum_to_str<{{enum.name}}>(const {{enum.name}}& val); //instantiate
 
 {%endfor%}
