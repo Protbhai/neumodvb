@@ -147,7 +147,7 @@ std::tuple<bool, bool, bool, bool> active_adapter_t::check_status() {
 
 int active_adapter_t::lnb_activate(const devdb::rf_path_t& rf_path,
 																	 const devdb::lnb_t& lnb, subscription_options_t tune_options) {
-	return this->fe->request_positioner_control(rf_path, lnb, tune_options);
+	return this->fe->request_positioner_control(tuner_thread, rf_path, lnb, tune_options);
 }
 
 void active_adapter_t::reset()
@@ -158,6 +158,10 @@ void active_adapter_t::reset()
 	lock_state = {};
 	usals_timer = {};
 	si.close();
+	for (auto& [pid, si_] : embedded_si_streams) {
+		si_.close();
+	}
+	embedded_si_streams.clear();
 }
 
 int active_adapter_t::retune(const devdb::rf_path_t& rf_path,
@@ -218,11 +222,7 @@ int active_adapter_t::tune(const subscribe_ret_t& sret,
 
 	if(!fe) {
 		dterrorf("Tune failed fe=null: mux={}", mux);
-#ifdef NEWTUNE
-		return -1;
-#else
 		assert(false);
-#endif
 	}
 
 	this->tune_options = tune_options;
@@ -231,14 +231,9 @@ int active_adapter_t::tune(const subscribe_ret_t& sret,
 		usals_timer.start(sret.tune_pars.dish->cur_usals_pos, sret.tune_pars.dish->target_usals_pos);
 	}
 	fe->request_tune(tuner_thread, rf_path, lnb, mux, tune_options);
-#ifdef NEWTUNE
-	tune_state = ret<0 ? TUNE_FAILED: WAITING_FOR_LOCK;
-	dtdebugf("Subscribed: subscription_id={:d} ret={:d}", (int) sret.subscription_id, ret);
-#else
 	tune_state = TUNE_REQUESTED;
 	dtdebugf("Subscribed: subscription_id={:d}", (int) sret.subscription_id);
 	auto ret=0;
-#endif
 	return ret;
 }
 
@@ -289,7 +284,7 @@ int active_adapter_t::restart_tune(const chdb::any_mux_t& mux, subscription_id_t
 
 
 template<typename mux_t>
-int active_adapter_t::tune(const mux_t& mux_, subscription_options_t tune_options, bool user_requested,
+int active_adapter_t::tune_dvbc_or_dvbt(const mux_t& mux_, subscription_options_t tune_options, bool user_requested,
 													 subscription_id_t subscription_id) {
 	mux_t mux;
 	if(user_requested) {
@@ -300,13 +295,8 @@ int active_adapter_t::tune(const mux_t& mux_, subscription_options_t tune_option
 	if(!fe)
 		return -1;
 	fe->request_tune(mux, tune_options);
-#ifdef NEWTUNE
-	tune_state = ret<0 ? TUNE_FAILED: WAITING_FOR_LOCK;
-	dtdebugf("Subscribed: subscription_id={:d} ret={:d}", (int) subscription_id, ret);
-#else
 	tune_state = TUNE_REQUESTED;
 	dtdebugf("Subscribed: subscription_id={:d}", (int) subscription_id);
-#endif
 	return 0;
 }
 
@@ -1207,9 +1197,9 @@ std::optional<std::tuple<steady_time_t, int16_t, int16_t>> usals_timer_t::end() 
 
 //instantiations
 template
-int active_adapter_t::tune<chdb::dvbc_mux_t>(const chdb::dvbc_mux_t& mux, subscription_options_t tune_options,
+int active_adapter_t::tune_dvbc_or_dvbt<chdb::dvbc_mux_t>(const chdb::dvbc_mux_t& mux, subscription_options_t tune_options,
 																						 bool user_requested, subscription_id_t subscription_id);
 
 template
-int active_adapter_t::tune<chdb::dvbt_mux_t>(const chdb::dvbt_mux_t& mux, subscription_options_t tune_options,
+int active_adapter_t::tune_dvbc_or_dvbt<chdb::dvbt_mux_t>(const chdb::dvbt_mux_t& mux, subscription_options_t tune_options,
 																						 bool user_requested, subscription_id_t subscription_id);

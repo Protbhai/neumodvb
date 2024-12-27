@@ -49,10 +49,9 @@ def subscription_fn(x):
     fesub = x[0].sub
     subs = fesub.subs
     mux_key = fesub.mux_key
-    if len(subs) == 0:
+    if fesub is None or len(subs) == 0:
         return ""
     ret=[]
-
     #lnb and rf input info common to all subscriptions
     sid = f"" if (mux_key.stream_id < 0) else f'-{mux_key.stream_id}'
     if mux_key.sat_pos == pychdb.sat.sat_pos_none:
@@ -88,12 +87,11 @@ def subscription_fn(x):
             assert type(sub.v) == pychdb.service.service
             #srv = ' '.join(str(sub.service).split(' ')[1:])
             srv=f'{sub.v.k.service_id} [{sub.v.ch_order}] {sub.v.name}'
-            ret.append(f'{sub.subscription_id}: {srv}')
+            ret.append(f'{sub.subscription_id}.{fesub.config_id}: {srv}')
         elif sub.has_mux:
             assert type(sub.v) == pychdb.service.service #not a mistake
-            ret.append(f'{sub.subscription_id}: {str(sub.v.k.mux)}')
+            ret.append(f'{sub.subscription_id}.{fesub.config_id}: {str(sub.v.k.mux)}')
         else:
-            assert type(sub.v) == pychdb.band_scan.band_scan
             usals_pos = fesub.usals_pos
             if usals_pos not in (pychdb.sat.sat_pos_dvbc, pychdb.sat.sat_pos_dvbt):
                 sat_pos=pychdb.sat_pos_str(usals_pos)
@@ -103,7 +101,7 @@ def subscription_fn(x):
                 ret.append(f'{sub.subscription_id}: {f}')
             else:
                 f = f'Exclusive'
-                ret.append(f'{sub.subscription_id}: {f}')
+                ret.append(f'{sub.subscription_id}.{fesub.config_id}: {f}')
     return '\n'.join(ret)
 
 class FrontendTable(NeumoTable):
@@ -111,7 +109,7 @@ class FrontendTable(NeumoTable):
     bool_fn = NeumoTable.bool_fn
     #frontend_fn = lambda x: f'{x[0].adapter_no}.{x[0].frontend_no}'
     frontend_fn = lambda x: f'{x[0].adapter_no}.{x[0].frontend_no}'
-    mac_fn = lambda x: x[1].to_bytes(6, byteorder='little').hex(":") if x[1]>=0 else '???'
+    mac_fn = lambda x: x[1].to_bytes(8, byteorder='little').hex(":")[:17] if x[1]>=0 else '???'
     enable_cfn = lambda table: table.enable_cfn()
     enable_sfn = lambda x: x[2].enable_sfn(x[0], x[1])
     enable_dfn = lambda x: x[2].enable_dfn(x[0])
@@ -134,7 +132,7 @@ class FrontendTable(NeumoTable):
          #CD(key='rf_in',  label='RF#', basic=True, readonly=True),
          CD(key='card_mac_address',  label='CARD MAC', basic=True, no_combo=True, readonly=True,
             dfn=mac_fn, example=" AA:BB:CC:DD:EE:FF "),
-         #CD(key='k.adapter_mac_address',  label='ADAP MAC', basic=True, no_combo=True, readonly=True, dfn=mac_fn, example=" AA:BB:CC:DD:EE:FF "),
+         CD(key='k.adapter_mac_address',  label='ADAP MAC', basic=True, no_combo=True, readonly=True, dfn=mac_fn, example=" AA:BB:CC:DD:EE:FF "),
          CD(key='card_address',  label='Bus', basic=True, example=" 0000:03:00.0 "),
          CD(key='present',  label='present', basic=True, dfn=bool_fn, readonly=True),
          CD(key='can_be_used',  label='available', basic=True, dfn=bool_fn, readonly=True),

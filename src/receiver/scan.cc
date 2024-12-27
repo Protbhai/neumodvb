@@ -442,8 +442,6 @@ scan_t::rescan_peak(const blindscan_t& blindscan, ssptr_t reusable_ssptr,
 	using namespace chdb;
 	scan_subscription_t* ss_ptr{nullptr};
 
-	assert(!blindscan.spectrum_acquired() || mux.k.sat_pos == blindscan.spectrum_key->sat_pos);
-
 	if (mux.c.scan_rf_path.lnb_id >=0 &&  mux.c.scan_rf_path.card_mac_address >=0 && mux.c.scan_rf_path.rf_input >=0) {
 		auto devdb_rtxn = receiver.devdb.rtxn();
 		auto lnb = devdb::lnb_for_lnb_id(devdb_rtxn, mux.c.scan_rf_path.dish_id, mux.c.scan_rf_path.lnb_id);
@@ -452,7 +450,7 @@ scan_t::rescan_peak(const blindscan_t& blindscan, ssptr_t reusable_ssptr,
 
 	mux.frequency = peak.peak.frequency;
 	if constexpr (is_same_type_v<decltype(mux), chdb::dvbs_mux_t>) {
-		assert(!blindscan.spectrum_acquired() || mux.k.sat_pos == blindscan.spectrum_key->sat_pos);
+		assert(!blindscan.spectrum_acquired() || std::abs(mux.k.sat_pos - blindscan.spectrum_key->sat_pos)<=100);
 		assert(!blindscan.spectrum_acquired() || mux.pol == peak.peak.pol);
 		if(blindscan.spectrum_acquired()) {
 			mux.symbol_rate = peak.peak.symbol_rate;
@@ -936,7 +934,7 @@ void scan_t::scan_loop(db_txn& chdb_rtxn, scan_subscription_t& subscription,
 
 	bool existing_subscription = (int)subscription.subscription_id >=0;
 	assert(existing_subscription);
-	assert(subscription.blindscan_key.sat_pos==finished_mux_key.sat_pos);
+	assert(std::abs(subscription.blindscan_key.sat_pos-finished_mux_key.sat_pos)<=100);
 	auto sat_pos =  subscription.blindscan_key.sat_pos;
 
 	ssptr_t ssptr_to_erase;
@@ -985,6 +983,11 @@ void scan_t::on_scan_mux_end(const devdb::fe_t& finished_fe, const chdb::any_mux
 
 	auto&scan_stats = get_scan_stats_ref(finished_mux);
 	scan_stats.active_muxes--;
+	static int m =0;
+	if (m < scan_stats.active_muxes)
+		m= scan_stats.active_muxes;
+	if( m>=14 && scan_stats.active_muxes <12)
+		printf("here\n");
 	assert(scan_stats.active_muxes>=0);
 
 	bool is_peak = subscription.peak.is_present();
@@ -1188,16 +1191,17 @@ scan_t::scan_try_mux(ssptr_t reusable_ssptr,
 	dtdebugf("Asking to subscribe {} reusable_ssptr={}", mux_to_scan, reusable_ssptr);
 	if(!reusable_ssptr)
 		reusable_ssptr = subscriber_t::make(&receiver, nullptr /*window*/);
+	scan_stats.active_muxes++;
 	ret =
 		receiver_thread.subscribe_mux(futures, wtxn, mux_to_scan, reusable_ssptr, tune_options,
 																	scan_id, true /*do_not_unsubscribe_on_failure*/);
 	wtxn.commit();
 	wait_for_all(futures); //remove later
-
 	if((int)ret >=0) {
 		dtdebugf("SUBSCRIBED {} reusable_ssptr={} ret={}",
 						 mux_to_scan, reusable_ssptr, (int) ret);
-		scan_stats.active_muxes++;
+	} else {
+		scan_stats.active_muxes--;
 	}
 	/*
 		When tuning fails, it is essential that tuner_thread does NOT immediately unsubscribe the mux,
@@ -1206,7 +1210,6 @@ scan_t::scan_try_mux(ssptr_t reusable_ssptr,
 		read transaction in the middle of a read loop
 	 */
 	assert((int)ret >=0 || ret != subscription_id_t::TUNE_FAILED);
-
 	/*An error can occur when resources cannot be reserved; this is reported immediately
 		by returning subscription_id_t == RESERVATION_FAILED;
 		Afterwards only tuning errors can occur. These errors will be noticed by error==true after
@@ -1727,7 +1730,7 @@ void scanner_t::on_sdt_actual(const subscriber_t& subscriber,
 			return;
 		}
 	}
-	dterrorf("NOT Notifying: monitored_subscription_id={:d}\n", (int) scan.monitored_subscription_id);
+	dtdebugf("NOT Notifying: monitored_subscription_id={:d}\n", (int) scan.monitored_subscription_id);
 }
 
 

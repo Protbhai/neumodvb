@@ -67,6 +67,9 @@ bool wait_for_all(std::vector<task_queue_t::future_t>& futures, bool clear_error
 		user_error_.clear();
 	bool error = false;
 	for (auto& f : futures) {
+		if(!f.valid()) {
+			dterrorf("Skipping future with invalid state"); //can happen when calling stop_running with a "wait" parameter
+		}
 		auto ret= f.get();
 		error |= (ret < 0);
 	}
@@ -211,7 +214,7 @@ void receiver_thread_t::release_active_adapter(std::vector<task_queue_t::future_
 			//ask tuner thread to exit, but do not wait
 			dtdebugf("Pushing tuner_thread.stop_running");
 			tuner_thread.update_dbfe(updated_dbfe);
-			futures.push_back(tuner_thread.stop_running(true/*wait*/));
+			tuner_thread.stop_running(true/*wait*/);
 		} else {
 			futures.push_back(tuner_thread.push_task([&tuner_thread, updated_dbfe = updated_dbfe]() {
 				tuner_thread.update_dbfe(updated_dbfe);
@@ -607,7 +610,6 @@ receiver_thread_t::subscribe_mux(
 		cb(aa.tuner_thread).subscribe_mux(sret, mux, tune_options);
 			return 0;
 	}));
-
 	return sret.subscription_id;
 }
 
@@ -806,9 +808,7 @@ subscription_id_t receiver_thread_t::subscribe_lnb(std::vector<task_queue_t::fut
 	tune_options.allowed_dish_ids = {};
 	tune_options.allowed_card_mac_addresses = {};
 	tune_options.need_spectrum = need_spectrum;
-	tune_options.may_control_lnb = true;
 	tune_options.may_move_dish = true;
-	tune_options.may_control_dish = true;
 	std::optional<int16_t> sat_pos_to_move_to;
 	if(need_spectrum)
 		sat_pos_to_move_to = tune_options.spectrum_scan_options.sat.sat_pos;
@@ -2177,7 +2177,6 @@ devdb::tune_options_t receiver_t::get_default_tune_options(devdb::subscription_t
 		break;
 	case subscription_type_t::LNB_CONTROL:
 		ret.scan_target =  scan_target_t::SCAN_MINIMAL;
-		ret.may_control_dish = true;
 		for_lnb_control = true;
 		break;
 	default:
@@ -2189,7 +2188,6 @@ devdb::tune_options_t receiver_t::get_default_tune_options(devdb::subscription_t
 	ret.dish_move_penalty = r->dish_move_penalty;
 	ret.use_blind_tune =  for_scan ? r->scan_use_blind_tune: r->tune_use_blind_tune;
 	ret.may_move_dish = for_lnb_control ? true : (for_scan ? r->scan_may_move_dish: r->tune_may_move_dish);
-	ret.may_control_lnb = for_lnb_control;
 	ret.scan_max_duration =  std::chrono::duration_cast<std::chrono::seconds>(r->scan_max_duration).count();
 
 	return ret;

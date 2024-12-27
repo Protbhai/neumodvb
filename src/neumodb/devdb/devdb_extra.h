@@ -208,10 +208,11 @@ namespace devdb::lnb {
 
 	std::tuple<uint32_t, uint32_t> lnb_frequency_range(const lnb_t& lnb);
 
+#if 0
 	void update_lnb_adapter_fields(db_txn& wtxn, const fe_t& fe);
+#endif
 
-
-	void update_lnbs(db_txn& devdb_wtxn);
+	void update_lnbs(db_txn& devdb_wtxn, const devdb::fe_t* update_for_fe);
 
 	inline bool can_move_dish(const lnb_connection_t& conn) {
 		switch(conn.rotor_control) {
@@ -252,7 +253,7 @@ namespace devdb::fe {
 																		 const subscription_options_t& tune_options,
 																		 const chdb::sat_t& sat,
 																		 const chdb::band_scan_t& band_scan,
-															 bool do_not_unsubscribe_on_failure);
+																		 bool do_not_unsubscribe_on_failure);
 
 	template<typename mux_t>
 	subscribe_ret_t

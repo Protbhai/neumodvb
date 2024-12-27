@@ -322,6 +322,7 @@ fe_subscription = db_struct(name='fe_subscription',
                            type_id= lord('qr'),
                            version = 1,
                            fields = ((1, 'int32_t', 'owner', -1),
+                                     (14, 'int32_t', 'config_id', -1),
                                      (3, 'rf_path_t', 'rf_path'),
                                      (2, 'int16_t', 'sat_pos', 'sat_pos_none'),   #if value is sat_pos_none
                                                                                   #then subscription
@@ -597,10 +598,6 @@ tune_options = db_struct(name ='tune_options',
               (7, 'bool', 'use_blind_tune', 'false'),
 	            (8, 'bool', 'may_move_dish', 'false'),    #subscription is allowed to move the dish when tuning if no
                                                         #other subscriptions conflict; afterwards dish may not be moved
-              (9, 'bool', 'may_control_dish', 'false'), #The subscription may move move the subscribed
-                                                        #dish to a new position at any time (exclusive use)
-              (10, 'bool', 'may_control_lnb', 'false'), #subscription may change pol/band and send diseqc at any time
-                                                        #(exclusive use)
 	            (11, 'bool', 'propagate_scan', 'true'),
 	            (12, 'bool', 'need_spectrum', 'false'),
 	            (13, 'retune_mode_t', 'retune_mode', 'retune_mode_t::AUTO'),

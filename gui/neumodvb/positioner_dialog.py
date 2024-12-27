@@ -333,11 +333,12 @@ class TuneMuxPanel(TuneMuxPanel_):
         dtdebug("saving")
         for n in self.lnb.networks:
             if n.sat_pos == self.sat.sat_pos:
+                changed = self.ref_mux is None or not same_mux_key(self.ref_mux.k, self.mux.k)
                 self.ref_mux = self.mux if self.signal_info is None else self.signal_info.driver_mux
                 self.ref_mux.k.sat_pos = self.sat.sat_pos
                 n.ref_mux = self.ref_mux.k
                 if self.mux is not None:
-                    self.current_lnb_network_changed |= not same_mux_key(self.ref_mux.k, self.mux.k)
+                    self.current_lnb_network_changed |= changed
                 break
 
         if self.current_lnb_network_changed:
@@ -431,7 +432,7 @@ class TuneMuxPanel(TuneMuxPanel_):
         mux =self.mux.copy()
         if self.use_blindscan:
             mux.k.t2mi_pid = -1
-            mux.k.mux_id = 0
+            #mux.k.mux_id = 0
         mux.c.tune_src = pychdb.tune_src_t.TEMPLATE
         mux.matype = -1
         self.ClearSignalInfo()
@@ -496,7 +497,7 @@ class TuneMuxPanel(TuneMuxPanel_):
         self.parent.UpdateSignalInfo(signal_info, self.tuned_)
         mux = signal_info.driver_mux
         sat_pos_confirmed = signal_info.sat_pos_confirmed #and not signal_info.on_wrong_sat
-        nit_valid = mux.c.tune_src == pychdb.tune_src_t.NIT_TUNED
+        nit_valid = mux.c.tune_src in (pychdb.tune_src_t.NIT_TUNED, pychdb.tune_src_t.NIT_CORRECTED)
         pol = neumodbutils.enum_to_str(mux.pol)
         if self.signal_info.nit_received:
             if nit_valid:
@@ -673,6 +674,8 @@ class TuneMuxPanel(TuneMuxPanel_):
         #    rec = pychdb.dvs_mux.dvbs_mux()
         #    rec.k.sat_pos = self.sat.sat_pos
         #    rec.frequency = self.lnb.k.lnb_type == pydevdb.lnb.lnb_
+        # main effect is to update ref_mux (will be saved later) and self.current_lnb_network_changed
+        # Note that this is an internal update and does not affect the database
         if rec.k.sat_pos == pychdb.sat.sat_pos_none:
             rec.k.sat_pos = self.sat.sat_pos
         dtdebug(f"UpdateRefMux: rec.k.sat_pos={rec.k.sat_pos} self.sat.sat_pos={self.sat.sat_pos}")
@@ -685,7 +688,6 @@ class TuneMuxPanel(TuneMuxPanel_):
             for n in self.lnb.networks:
                 if n.sat_pos == self.mux.k.sat_pos:
                     assert self.sat.sat_pos == self.mux.k.sat_pos
-                    self.current_lnb_network_changed |= not same_mux_key(n.ref_mux, self.mux.k)
                     n.ref_mux = self.mux.k
                     dtdebug(f"saving ref_mux={self.mux}")
                     return
